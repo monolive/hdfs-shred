@@ -1,0 +1,32 @@
+Connecting to namenode via http://hawq03.hawq03.f4.internal.cloudapp.net:50070/fsck?ugi=orenault&files=1&blocks=1&locations=1&path=%2Fuser%2Forenault%2Fmybigfile
+FSCK started by orenault (auth:KERBEROS_SSL) from /172.16.0.10 for path /user/orenault/mybigfile at Wed Apr 06 14:02:38 UTC 2016
+/user/orenault/mybigfile 1073741824 bytes, 8 block(s):  OK
+0. BP-1420600807-172.16.0.30-1452120396237:blk_1073839025_116619 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.40:1019,DS-589158a2-cacf-4993-92ab-0c08f9a092de,DISK], DatanodeInfoWithStorage[172.16.0.50:1019,DS-55dae783-c3df-4c65-bf76-e42d970a8d55,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+1. BP-1420600807-172.16.0.30-1452120396237:blk_1073839026_116620 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.70:1019,DS-ee789d29-105d-4eb9-966b-50a5d60a960d,DISK], DatanodeInfoWithStorage[172.16.0.50:1019,DS-55dae783-c3df-4c65-bf76-e42d970a8d55,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+2. BP-1420600807-172.16.0.30-1452120396237:blk_1073839027_116621 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.70:1019,DS-ee789d29-105d-4eb9-966b-50a5d60a960d,DISK], DatanodeInfoWithStorage[172.16.0.60:1019,DS-56c56a37-8a54-46b9-b85b-6414a0e13739,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+3. BP-1420600807-172.16.0.30-1452120396237:blk_1073839028_116622 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.40:1019,DS-589158a2-cacf-4993-92ab-0c08f9a092de,DISK], DatanodeInfoWithStorage[172.16.0.50:1019,DS-55dae783-c3df-4c65-bf76-e42d970a8d55,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+4. BP-1420600807-172.16.0.30-1452120396237:blk_1073839029_116623 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.40:1019,DS-589158a2-cacf-4993-92ab-0c08f9a092de,DISK], DatanodeInfoWithStorage[172.16.0.70:1019,DS-ee789d29-105d-4eb9-966b-50a5d60a960d,DISK], DatanodeInfoWithStorage[172.16.0.50:1019,DS-55dae783-c3df-4c65-bf76-e42d970a8d55,DISK]]
+5. BP-1420600807-172.16.0.30-1452120396237:blk_1073839030_116624 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.70:1019,DS-ee789d29-105d-4eb9-966b-50a5d60a960d,DISK], DatanodeInfoWithStorage[172.16.0.60:1019,DS-56c56a37-8a54-46b9-b85b-6414a0e13739,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+6. BP-1420600807-172.16.0.30-1452120396237:blk_1073839031_116625 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.90:1019,DS-eec294e4-96f6-41ba-9a5c-1fb527f29e24,DISK], DatanodeInfoWithStorage[172.16.0.50:1019,DS-55dae783-c3df-4c65-bf76-e42d970a8d55,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+7. BP-1420600807-172.16.0.30-1452120396237:blk_1073839032_116626 len=134217728 repl=3 [DatanodeInfoWithStorage[172.16.0.70:1019,DS-ee789d29-105d-4eb9-966b-50a5d60a960d,DISK], DatanodeInfoWithStorage[172.16.0.60:1019,DS-56c56a37-8a54-46b9-b85b-6414a0e13739,DISK], DatanodeInfoWithStorage[172.16.0.80:1019,DS-7cfc6d5c-9e7a-4d49-831d-81d92109d193,DISK]]
+
+Status: HEALTHY
+ Total size:    1073741824 B
+ Total dirs:    0
+ Total files:   1
+ Total symlinks:                0
+ Total blocks (validated):      8 (avg. block size 134217728 B)
+ Minimally replicated blocks:   8 (100.0 %)
+ Over-replicated blocks:        0 (0.0 %)
+ Under-replicated blocks:       0 (0.0 %)
+ Mis-replicated blocks:         0 (0.0 %)
+ Default replication factor:    3
+ Average block replication:     3.0
+ Corrupt blocks:                0
+ Missing replicas:              0 (0.0 %)
+ Number of data-nodes:          6
+ Number of racks:               1
+FSCK ended at Wed Apr 06 14:02:38 UTC 2016 in 1 milliseconds
+
+
+The filesystem under path '/user/orenault/mybigfile' is HEALTHY
