@@ -16,8 +16,7 @@ def checkFile(file):
   '''
   command = "hdfs dfs -stat " + file
   cmd = shlex.split(command)
-  print cmd
-  subprocess.check_call(cmd)
+  subprocess.check_call(cmd) except CalledProcessError as e: print str(e.output)
 
 def getBlocks(file):
   '''
