@@ -14,7 +14,7 @@ def checkFile(file):
   '''
   Check if file exist in HDFS
   '''
-  command = "hdfs fsck -stat " + file
+  command = "hdfs dfs -stat " + file
   cmd = shlex.split(command)
   print cmd
   subprocess.check_call(cmd)
