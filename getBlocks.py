@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 import subprocess
+import shlex
 import argparse
 
 def readArguments():
@@ -14,8 +15,9 @@ def checkFile(file):
   Check if file exist in HDFS
   '''
   command = "hdfs fsck -stat " + file
-  subprocess.check_call(command)
-
+  cmd = shlex.split(command)
+  print cmd
+  subprocess.check_call(cmd)
 
 def getBlocks(file):
   '''
