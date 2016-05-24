@@ -17,29 +17,29 @@ remove_test_data = False
 
 
 def setup_module():
-    print "Begin Setup"
+    shred.log.info("Begin Setup")
     # Check if test data already exists
     test_data_exists_cmd = ["hdfs", "dfs", "-stat", join(test_file_path, test_file_name)]
     test_data_exists_iter = shred.run_shell_command(test_data_exists_cmd)
     test_data_exists_resp = next(test_data_exists_iter)
     if "No such file or directory" in test_data_exists_resp:
         test_data_exists_state = False
-        print "Test Data not Found"
+        shred.log.info("Test Data not Found")
     else:
         test_data_exists_state = True
-        print "Test Data already exists"
+        shred.log.info("Test Data already exists")
     if test_data_exists_state is False:
         # Generate test data
-        print "Generating Test Data..."
+        shred.log.info("Generating Test Data...")
         gen_test_data_cmd = ["/usr/hdp/current/hadoop-client/bin/hadoop", "jar",
                    glob("/usr/hdp/current/hadoop-mapreduce-client/hadoop-mapreduce-examples-*.jar")[0],
                    "teragen", test_file_size, join(test_file_path, test_file_name)]
         gen_test_data_iter = shred.run_shell_command(gen_test_data_cmd)
         for line in gen_test_data_iter:
             if "Bytes Written" in line:
-                print line
+                shred.log.info(line)
     # get test files
-    print "Getting list of Test Files"
+    shred.log.info("Getting list of Test Files")
     test_files = []
     filelist_cmd = ["hdfs", "dfs", "-ls", join(test_file_path, test_file_name)]
     filelist_iter = shred.run_shell_command(filelist_cmd)
@@ -51,20 +51,20 @@ def setup_module():
 
 
 def teardown_module():
-    print "Begin Teardown..."
+    shred.log.info("Begin Teardown...")
     # Remove test data
     if remove_test_data:
-        print "Removing Test Data"
+        shred.log.info("Removing Test Data")
         rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", join(test_file_path, test_file_name)]
         rmdir_iter = shred.run_shell_command(rmdir_cmd)
         for line in rmdir_iter:
-            print line
+            shred.log.info(line)
     else:
-        print "Skipping removal of test data"
+        shred.log.info("Skipping removal of test data")
 
 
 def test_parse_args():
-    print "Testing argparse"
+    shred.log.info("Testing argparse")
     out = shred.parse_args(["-m", "file", "-f", "somefile"])
     assert out.filename == "somefile"
     assert out.mode == "file"

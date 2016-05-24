@@ -4,14 +4,10 @@
 
 VERSION = "0.0.1"
 
+
 PATHS = {
     'HDFS_APP_ROOT': '/apps/shred',
     'HDFS_LOG_ROOT': '/app-logs/shred'
-}
-
-LOGGING = {
-    'CLIENT_BASENAME': 'shred-client_',
-    'WORKER_BASENAME': 'shred-worker_'
 }
 
 ZOOKEEPER = {

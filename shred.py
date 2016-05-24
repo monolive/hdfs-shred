@@ -8,6 +8,18 @@ import re
 import subprocess
 import argparse
 import conf
+import logging
+import logging.handlers
+
+log = logging.getLogger('hdfshred')
+log.setLevel(logging.INFO)
+handler = logging.handlers.SysLogHandler(address='/dev/log')
+formatter = logging.Formatter('%(module)s.%(funcName)s: %(message)s')
+handler.setFormatter(formatter)
+log.addHandler(handler)
+# Uncomment these two lines to echo sniffed packets to the console for debugging
+# con_handler = logging.StreamHandler()
+# log.addHandler(con_handler)
 
 
 def parse_args(args):
@@ -19,18 +31,24 @@ def parse_args(args):
                         help="Specify mode; Delete a FILE from HDFS and add to the shred queue, "
                              "or find and shred all BLOCKS in the queue on this Datanode.")
     parser.add_argument('-f', '--filename', action="store", help="Specify a filename for the --shred file mode.")
+    parser.add_argument('--debug', action="store_true", help='Increase logging verbosity.')
+    log.debug("Parsing commandline args")
     result = parser.parse_args(args)
+    if result.debug:
+        log.setLevel(logging.DEBUG)
     if result.mode is 'file' and result.filename is None:
+        log.error("Argparse found a bad arg combination, posting info and quitting")
         parser.error("--mode 'file' requires a filename to register for shredding.")
     if result.mode is 'blocks' and result.filename:
+        log.error("Argparse found a bad arg combination, posting info and quitting")
         parser.error("--mode 'blocks' cannot be used to register a new filename for shredding."
                      " Please try '--mode file' instead.")
+    log.info("Argparsing complete, returning args to main function")
     return result
 
 
 def connect_zk(host):
     """create connection to ZooKeeper"""
-    # TODO: Add logging
     zk = KazooClient(hosts=host)
     zk.start()
     if zk.state is 'CONNECTED':

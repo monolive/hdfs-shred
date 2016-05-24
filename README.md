@@ -3,12 +3,11 @@ Client extension to ensure shredding of files deleted from HDFS.
 
 ## Features
 
-* [TODO]Managed via central config file.  
-* [TODO]Logs all activity to HDFS location.  
+* Managed via central config file.  
+* Logs all activity to local Syslog.  
 * [TODO]Uses ZooKeeper to track state of deletion and shredding.  
-* [TODO]Uses hadoop fsck to get file blocks. 
-* [TODO]Uses HDFS Client to delete files.  
-* [TODO]Uses Cron to schedule shred jobs on Datanodes to avoid IO conflict.  
+* Uses hadoop fsck to get file blocks. 
+* [TODO]Uses HDFS Client to delete files.    
 * [TODO]Uses Linux shred command to destroy blocks as regular job.  
 
 ## Logic
