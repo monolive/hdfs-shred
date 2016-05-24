@@ -3,3 +3,7 @@ lib/
 include/
 .DS_Store
 .Python
+
+# Pycharm Exclusions
+.idea
+
