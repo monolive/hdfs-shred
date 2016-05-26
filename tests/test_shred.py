@@ -14,6 +14,7 @@ test_file_path = "/tmp/"
 test_file_name = "shred_test_file"
 
 remove_test_data = False
+shred.log.setLevel(shred.logging.DEBUG)
 
 
 def setup_module():
