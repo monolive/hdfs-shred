@@ -5,16 +5,26 @@ from os.path import join
 from glob import glob
 from shlex import split as ssplit
 import argparse
+from kazoo.client import KazooClient
+from kazoo.handlers.threading import KazooTimeoutError
 import pytest
 import shred
+import logging
+import collections
 
 
 test_file_size = "10"
 test_file_path = "/tmp/"
 test_file_name = "shred_test_file"
+test_files = []
 
-remove_test_data = False
+# Test control Params
+remove_test_files = False
+remove_test_zkdata = True
+
+# Config overrides
 shred.log.setLevel(shred.logging.DEBUG)
+shred.conf.ZOOKEEPER['PATH'] = '/shredtest/'
 
 
 def setup_module():
@@ -41,7 +51,6 @@ def setup_module():
                 shred.log.info(line)
     # get test files
     shred.log.info("Getting list of Test Files")
-    test_files = []
     filelist_cmd = ["hdfs", "dfs", "-ls", join(test_file_path, test_file_name)]
     filelist_iter = shred.run_shell_command(filelist_cmd)
     for line in filelist_iter:
@@ -54,7 +63,7 @@ def setup_module():
 def teardown_module():
     shred.log.info("Begin Teardown...")
     # Remove test data
-    if remove_test_data:
+    if remove_test_files:
         shred.log.info("Removing Test Data")
         rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", join(test_file_path, test_file_name)]
         rmdir_iter = shred.run_shell_command(rmdir_cmd)
@@ -62,6 +71,13 @@ def teardown_module():
             shred.log.info(line)
     else:
         shred.log.info("Skipping removal of test data")
+    if remove_test_zkdata:
+        shred.log.info("Removing test ZK Data")
+        zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
+        zk_conn = shred.connect_zk(zk_host)
+        zk_conn.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
+    else:
+        shred.log.info("Skipping removal of test ZK Data")
 
 
 def test_parse_args():
@@ -77,3 +93,58 @@ def test_parse_args():
         out = shred.parse_args(["-v"])
     with pytest.raises(SystemExit):
         out = shred.parse_args(["-h"])
+
+
+def test_check_hdfs_compat():
+    shred.log.info("Testing HDFS Compatibility - Placeholder")
+    # TODO: Write more meaningful test for this function
+    out = shred.check_hdfs_compat()
+    assert out == True
+
+
+def test_connect_zk():
+    shred.log.info("Testing ZooKeeper connector")
+    # Bad Host
+    with pytest.raises(KazooTimeoutError):
+        out = shred.connect_zk('badhost:25531')
+    # Good host
+    zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
+    zk = shred.connect_zk(zk_host)
+    assert zk.state == 'CONNECTED'
+
+
+def test_check_hdfs_for_file():
+    shred.log.info("Testing HDFS File checker")
+    # Test good file
+    out = shred.check_hdfs_for_file(test_files[-1])
+    assert out is True
+    # Test bad file
+    with pytest.raises(ValueError):
+        shred.check_hdfs_for_file('/tmp/notafile')
+    # test passing a dir
+    with pytest.raises(ValueError):
+        shred.check_hdfs_for_file('/tmp')
+
+
+def test_get_fsck_output():
+    shred.log.info("Testing FSCK information fetcher")
+    out = shred.get_fsck_output(test_files[-1])
+    assert isinstance(out, collections.Iterator)
+
+
+def test_parse_blocks_from_fsck():
+    shred.log.info("Testing FSCK parser")
+    fsck_content = shred.get_fsck_output(test_files[-1])
+    out = shred.parse_blocks_from_fsck(fsck_content)
+    assert isinstance(out, dict)
+    # TODO: Test dictionary entries for IP and list of blk_<num> entries
+    
+    
+def test_write_blocks_to_zk():
+    shred.log.info("Testing ZooKeeper blocklist writer")
+    zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
+    zk_conn = shred.connect_zk(zk_host)
+    fsck_content = shred.get_fsck_output(test_files[-1])
+    blocklist = shred.parse_blocks_from_fsck(fsck_content)
+    shred.write_blocks_to_zk(zk_conn, blocklist)
+    # TODO: Test that blocks sent to function are written as expected

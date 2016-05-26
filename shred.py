@@ -17,13 +17,16 @@ import argparse
 from kazoo.client import KazooClient
 from syslog_rfc5424_formatter import RFC5424Formatter
 
-from .conf import conf
+from config import conf
 
 log = logging.getLogger('hdfshred')
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.INFO)
 handler = logging.handlers.SysLogHandler(address='/dev/log')
 handler.setFormatter(RFC5424Formatter())
 log.addHandler(handler)
+# Uncomment these two lines to eco logging to console - useful when testing
+con_handler = logging.StreamHandler()
+log.addHandler(con_handler)
 
 
 def parse_args(args):
@@ -53,7 +56,7 @@ def parse_args(args):
 
 def connect_zk(host):
     """create connection to ZooKeeper"""
-    log.debug("Connecting to Zookeeper using host param [{0}]").format(host)
+    log.debug("Connecting to Zookeeper using host param [{0}]".format(host))
     zk = KazooClient(hosts=host)
     zk.start()
     if zk.state is 'CONNECTED':
@@ -77,22 +80,42 @@ def run_shell_command(command):
     return iter(p.stdout.readline, b'')
 
 
-def test_hdfs_available():
-    """Checks if we can connect to HDFS"""
-    return True
+def check_hdfs_compat():
+    """Checks if we can connect to HDFS and it's a tested version"""
+    # TODO: Collect version number and pass back that or error
+    hdfs_compat_iter = run_shell_command(['hdfs', 'version'])
+    result = False
+    firstline = hdfs_compat_iter.next()   # Firstline should be version number if it works
+    for vers in conf.COMPAT:
+        if vers in firstline:
+            result = True
+    return result
 
 
 def check_hdfs_for_file(target):
-    """Checks if file requested for shredding actually exists on HDFS."""
-    # TODO: Run test for file existing in given HDFS path
-    # "hdfs dfs -stat " + file_to_shred
-    return True
+    """
+    Checks if file requested for shredding actually exists on HDFS.
+    Returns True if file is Found.
+    Returns Error details if it is not found.
+    """
+    log.debug("Checking validity of HDFS File target [{0}]".format(target))
+    file_check_isDir = subprocess.call(['hdfs', 'dfs', '-test', '-d', target])
+    log.debug("File Check isDir returned [{0}]".format(file_check_isDir))
+    if file_check_isDir is 0:   # Returns 0 on success
+        raise ValueError("Target [{0}] is a directory.".format(target))
+    file_check_isFile = subprocess.call(['hdfs', 'dfs', '-test', '-e', target])
+    log.debug("File Check isFile returned [{0}]".format(file_check_isFile))
+    if file_check_isFile is not 0:    # Returns 0 on success
+        raise ValueError("Target [{0}]: File not found.".format(target))
+    else:
+        return True
 
 
 def get_fsck_output(target):
     """Runs HDFS FSCK on the HDFS File to get block location information for Linux shredder"""
-    fsck_out_iter = run_shell_command(['cat', 'sample-data.txt'])
-    # "hdfs fsck " + file_to_shred + " -files -blocks -locations"
+    # fsck_out_iter = run_shell_command(['cat', 'sample-data.txt'])
+    fsck_out_iter = run_shell_command(["hdfs", "fsck", target, "-files", "-blocks", "-locations"])
+    log.debug("Fsck_out type is [{0}]".format(type(fsck_out_iter)))
     return fsck_out_iter
 
 
@@ -114,87 +137,101 @@ def parse_blocks_from_fsck(raw_fsck):
                     output[dn_ip[0]].append(block_id[0])
         except StopIteration:
             break
+    log.debug("FSCK parser output [{0}]".format(output))
     return output
 
 
 def write_blocks_to_zk(zk_conn, data):
     """Write block to be deleted to zookeeper"""
-    # TODO: Keep tracked of deleted block / files
-    count = 1
-    while count < len(data):
-        zk_path = "/shred/" + data[count]
-        print zk_path
-        zk_conn.ensure_path(zk_path)
-        zk_path = zk_path + "/" + data[0]
-        zk_conn.create(zk_path, makepath=True)
-        count += 1
+    log.debug("ZK Writer passed blocklists for [{0}] Datanodes to shred".format(len(data)))
+    for datanode_ip in data:
+        log.debug("Processing blocklist for Datanode [{0}]".format(datanode_ip))
+        zk_path_dn = conf.ZOOKEEPER['PATH'] + datanode_ip
+        zk_conn.ensure_path(zk_path_dn)
+        for block_id in data[datanode_ip]:
+            zk_path_blk = zk_path_dn + "/" + block_id
+            zk_conn.create(zk_path_blk, makepath=True)
+        log.debug("List of blocks written for this DN: [{0}]".format(zk_conn.get_children(zk_path_dn)))
+    log.debug("List of DNs written to ZK: [{0}]".format(zk_conn.get_children(conf.ZOOKEEPER['PATH'])))
+    # TODO: Test ZK nodes are all created as expected
+    # TODO: Handle existing ZK nodes
 
 
 def read_blocks_from_zk(zk_conn, dn_id):
     """Read blocks to be deleted from Zookeeper"""
+    # TODO: Write this function to return more than a placeholder
     output = {}
     return output
 
 
 def generate_shred_task_list(block_dict):
     """Generate list of tasks of blocks to shred for this host"""
+    # TODO: Write this function to return more than a placeholder
     output = {}
     return output
 
 
 def shred_blocks(blocks):
     """Reliable shred process to ensure blocks are truly gone baby gone"""
+    # TODO: Write this function to return more than a placeholder
+    # TODO: Keep tracked of deleted block / files
     pass
+
+
+def get_datanode_ip():
+    """Returns the IP of this Datanode"""
+    # TODO: Write this function to return more than a placeholder
+    return "127.0.0.1"
 
 
 def main():
     log.info("shred.py called with args [{0}]").format(sys.argv[1:])
     # Get invoke parameters
     log.debug("Parsing args using Argparse module.")
-    args = parse_args(sys.argv[1:])
+    args = parse_args(sys.argv[1:])                                             # Test Written
     # Checking the config was pulled in
     log.debug("Checking for config parameters.")
-    if not conf:
-        raise "Config from conf.py not found, please check configuration file is available and try again."
+    if not conf.VERSION:
+        raise "Config from config.py not found, please check configuration file is available and try again."
     # Test necessary connections
     log.debug("Checking if we can find the HDFS client and HDFS instance to connect to.")
-    if not test_hdfs_available:
+    if not check_hdfs_compat:                                                   # Test Written
         raise "Could not find HDFS, please check the HDFS client is installed and HDFS is available and try again."
     # Test for Zookeeper connectivity
     log.debug("Looking for ZooKeeper")
-    zk_host_connection_string = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
-    zk = connect_zk(zk_host_connection_string)
+    zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
+    zk = connect_zk(zk_host)                                  # Test Written
 
     if args.mode is 'file':
         log.debug("Detected that we're running in 'File' Mode")
         # Test if target file exists on HDFS
         log.debug("Checking if file exists in HDFS")
-        file_exists = check_hdfs_for_file(args.file_to_shred)
-        if not file_exists:
+        file_exists = check_hdfs_for_file(args.file_to_shred)                   # Test Written
+        if file_exists is not True:
             raise "File for shredding not found on HDFS: [{0}]".format(args.file_to_shred)
         # Get block information for the file we are to shred
         log.debug("Requesting FSCK information for file.")
-        fsck_output = get_fsck_output(args.file_to_shred)
+        fsck_output = get_fsck_output(args.file_to_shred)                       # Test Written
         log.debug("Requesting parser to return clean dict of block files to shred")
         # Parse HDFS fsck output into a dictionary of datanodes with lists of block IDs
-        blocks_dict_out = parse_blocks_from_fsck(fsck_output)
+        blocks_dict_out = parse_blocks_from_fsck(fsck_output)                   # Test Written
         # Store blocks to be shredded into Zookeeper
         log.debug("Writing datanodes and blocks information to ZooKeeper for shredding workers")
-        write_blocks_to_zk(zk, blocks_dict_out)
+        write_blocks_to_zk(zk, blocks_dict_out)                                 # Test Written
     elif args.mode is 'blocks':
         log.debug("Detected that we're running in Block Shredding worker mode")
         # Get my IP
         log.debug("Determinging this DataNode's IP")
-        dn_id = "myip"
+        dn_id = get_datanode_ip()                                               # TODO: Write Test
         # Get current blocks list from zk
         log.debug("Getting list of block shredding tasks for this Datanode")
-        block_dict_in = read_blocks_from_zk(zk, dn_id)
+        block_dict_in = read_blocks_from_zk(zk, dn_id)                          # TODO: Write Test
         # Parse Block Dict into task list
         log.debug("Parsing block list into list of shredding tasks")
-        shred_task_iter = generate_shred_task_list(block_dict_in)
+        shred_task_iter = generate_shred_task_list(block_dict_in)               # TODO: Write Test
         # Execute Shred Processor
         log.debug("Requesting shredding task execution")
-        shred_blocks(shred_task_iter)
+        shred_blocks(shred_task_iter)                                           # TODO: Write Test
     else:
         raise "Bad operating mode [{0}] detected. Please retry by specifying mode of either 'file' or 'blocks'." \
             .format(args.mode)
