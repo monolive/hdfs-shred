@@ -20,7 +20,7 @@ test_files = []
 
 # Test control Params
 remove_test_files = False
-remove_test_zkdata = True
+remove_test_zkdata = False
 
 # Config overrides
 shred.log.setLevel(shred.logging.DEBUG)
@@ -80,6 +80,7 @@ def teardown_module():
         shred.log.info("Skipping removal of test ZK Data")
 
 
+@pytest.mark.slow
 def test_parse_args():
     shred.log.info("Testing argparse")
     out = shred.parse_args(["-m", "file", "-f", "somefile"])
@@ -95,6 +96,7 @@ def test_parse_args():
         out = shred.parse_args(["-h"])
 
 
+@pytest.mark.slow
 def test_check_hdfs_compat():
     shred.log.info("Testing HDFS Compatibility - Placeholder")
     # TODO: Write more meaningful test for this function
@@ -102,6 +104,7 @@ def test_check_hdfs_compat():
     assert out == True
 
 
+@pytest.mark.slow
 def test_connect_zk():
     shred.log.info("Testing ZooKeeper connector")
     # Bad Host
@@ -113,6 +116,7 @@ def test_connect_zk():
     assert zk.state == 'CONNECTED'
 
 
+@pytest.mark.slow
 def test_check_hdfs_for_file():
     shred.log.info("Testing HDFS File checker")
     # Test good file
@@ -126,20 +130,22 @@ def test_check_hdfs_for_file():
         shred.check_hdfs_for_file('/tmp')
 
 
+@pytest.mark.slow
 def test_get_fsck_output():
     shred.log.info("Testing FSCK information fetcher")
     out = shred.get_fsck_output(test_files[-1])
     assert isinstance(out, collections.Iterator)
 
 
+@pytest.mark.slow
 def test_parse_blocks_from_fsck():
     shred.log.info("Testing FSCK parser")
     fsck_content = shred.get_fsck_output(test_files[-1])
     out = shred.parse_blocks_from_fsck(fsck_content)
     assert isinstance(out, dict)
     # TODO: Test dictionary entries for IP and list of blk_<num> entries
-    
-    
+
+
 def test_write_blocks_to_zk():
     shred.log.info("Testing ZooKeeper blocklist writer")
     zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])

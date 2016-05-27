@@ -14,11 +14,7 @@ Client extension to ensure shredding of files deleted from HDFS.
 
 ### Structure
 
-app root:   hdfs://apps/shred  
-conf:       hdfs://apps/shred/hdfs-shred.conf  
-log root:   hdfs://app-logs/shred/  
-nn log:     hdfs://app-logs/shred/nn-clientxxx.log  
-dn logs:    hdfs://app-logs/shred/dn-workerxxx.log  
+  
 
 
 ### nn-client, for user interaction

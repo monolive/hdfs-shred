@@ -9,13 +9,14 @@ Executes as a worker on each Datanode to shred the blocks in the Linux FS.
 
 import logging
 import logging.handlers
+from syslog_rfc5424_formatter import RFC5424Formatter
 import re
 import subprocess
 import sys
-
 import argparse
+import pickle
+from zlib import compress, decompress
 from kazoo.client import KazooClient
-from syslog_rfc5424_formatter import RFC5424Formatter
 
 from config import conf
 
@@ -148,23 +149,50 @@ def write_blocks_to_zk(zk_conn, data):
         log.debug("Processing blocklist for Datanode [{0}]".format(datanode_ip))
         zk_path_dn = conf.ZOOKEEPER['PATH'] + datanode_ip
         zk_conn.ensure_path(zk_path_dn)
-        for block_id in data[datanode_ip]:
-            zk_path_blk = zk_path_dn + "/" + block_id
-            zk_conn.create(zk_path_blk, makepath=True)
-        log.debug("List of blocks written for this DN: [{0}]".format(zk_conn.get_children(zk_path_dn)))
-    log.debug("List of DNs written to ZK: [{0}]".format(zk_conn.get_children(conf.ZOOKEEPER['PATH'])))
+        zk_conn.create(
+            path=zk_path_dn + '/blocklist',
+            value=compress(pickle.dumps(data[datanode_ip]))
+        )
+        zk_conn.create(
+            path=zk_path_dn + '/status',
+            value='file_not_deleted_blocklist_written'
+        )
+    log.debug("List of DN Blocklists written to ZK: [{0}]".format(zk_conn.get_children(conf.ZOOKEEPER['PATH'])))
     # TODO: Test ZK nodes are all created as expected
     # TODO: Handle existing ZK nodes
+    return True
+
+
+def delete_file_from_hdfs(target):
+    """Uses HDFS Client to delete the file from HDFS
+    Returns a Bool result"""
+    return True
+
+
+def get_datanode_ip():
+    """Returns the IP of this Datanode"""
+    # TODO: Write this function to return more than a placeholder
+    return "127.0.0.1"
 
 
 def read_blocks_from_zk(zk_conn, dn_id):
-    """Read blocks to be deleted from Zookeeper"""
-    # TODO: Write this function to return more than a placeholder
-    output = {}
-    return output
+    """
+    Read blocks to be deleted from Zookeeper
+    Requires active ZooKeeper connection and the datanode-ID as it's IP as a string
+    """
+    # TODO: Check dn_id is valid
+    log.debug("Attempting to read blocklist for Datanode [{0}]".format(dn_id))
+    zk_path_dn = conf.ZOOKEEPER['PATH'] + dn_id
+    dn_status = zk_conn.get(zk_path_dn + '/status')
+    if dn_status[0] is 'file_not_deleted_blocklist_written':
+        dn_node = zk_conn.get(zk_path_dn + '/blocklist')
+        blocklist = pickle.loads(decompress(dn_node[0]))
+        return blocklist
+    else:
+        raise ValueError("Blocklist Status for this DN is not as expected at [{0}]".format(zk_path_dn + '/status'))
 
 
-def generate_shred_task_list(block_dict):
+def generate_shred_task_list(block_list):
     """Generate list of tasks of blocks to shred for this host"""
     # TODO: Write this function to return more than a placeholder
     output = {}
@@ -176,12 +204,6 @@ def shred_blocks(blocks):
     # TODO: Write this function to return more than a placeholder
     # TODO: Keep tracked of deleted block / files
     pass
-
-
-def get_datanode_ip():
-    """Returns the IP of this Datanode"""
-    # TODO: Write this function to return more than a placeholder
-    return "127.0.0.1"
 
 
 def main():
@@ -217,7 +239,14 @@ def main():
         blocks_dict_out = parse_blocks_from_fsck(fsck_output)                   # Test Written
         # Store blocks to be shredded into Zookeeper
         log.debug("Writing datanodes and blocks information to ZooKeeper for shredding workers")
-        write_blocks_to_zk(zk, blocks_dict_out)                                 # Test Written
+        blocklist_status = write_blocks_to_zk(zk, blocks_dict_out)                                 # Test Written
+        if blocklist_status is True:
+            del_status = delete_file_from_hdfs(args.file_to_shred)
+            if del_status is True:
+                log.info("File [{0}] loaded for Shredding and deleted from HDFS")
+                exit(0)
+        else:
+            raise StandardError("Failure to store HDFS file Blocklist to ZooKeeper for shredding, will not delete file.")
     elif args.mode is 'blocks':
         log.debug("Detected that we're running in Block Shredding worker mode")
         # Get my IP
@@ -225,10 +254,10 @@ def main():
         dn_id = get_datanode_ip()                                               # TODO: Write Test
         # Get current blocks list from zk
         log.debug("Getting list of block shredding tasks for this Datanode")
-        block_dict_in = read_blocks_from_zk(zk, dn_id)                          # TODO: Write Test
+        block_list_in = read_blocks_from_zk(zk, dn_id)                          # TODO: Write Test
         # Parse Block Dict into task list
         log.debug("Parsing block list into list of shredding tasks")
-        shred_task_iter = generate_shred_task_list(block_dict_in)               # TODO: Write Test
+        shred_task_iter = generate_shred_task_list(block_list_in)               # TODO: Write Test
         # Execute Shred Processor
         log.debug("Requesting shredding task execution")
         shred_blocks(shred_task_iter)                                           # TODO: Write Test
