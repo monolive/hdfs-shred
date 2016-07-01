@@ -1,5 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
+
 """
 Proof of Concept Hadoop to shred files deleted from HDFS for audit compliance.
 See https://github.com/Chaffleson/hdfs-shred

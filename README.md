@@ -1,5 +1,6 @@
 # hdfs-shred
 Proof of Concept linux-daemon for Hadoop: Shred files deleted from HDFS for audit compliance.  
+With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.
 
 ## Summary
 Uses a three-phase approach to the secure shredding of files in HDFS, which match three operational modes for the program:
@@ -8,34 +9,41 @@ Uses a three-phase approach to the secure shredding of files in HDFS, which matc
 * A worker (Foot Soldiers); to run on each Datanode, which coordinates deleting the file from HDFS while also reserving the physical sections of disk the file resided on for later shredding
 * The Shredder; to run on each Datanode out-of-hours, and 'shred' the sections of disk which held the data before returning them to use in the filesystem
 
-## Operational Modes
+## Operational Modes' workflows
 ### Client
 Check that a valid file has been submitted for Shredding  
 Check that HDFS Client and ZooKeeper are available  
-Write File as a job to ZooKeeper  
+Moves the File to /.shred directory in HDFS and creates numbered subdir to track job actions and status
 
 ### Worker
-Runs every x minutes by conf schedule on all datanodes  
-Checks for new jobs in ZK  
+Runs every x minutes on all DataNodes  
+Checks for new jobs in HDFS:/.shred  
 Generates a leader election via ZK if necessary  
-Checks all Datanodes are represented in the quorum  
-Leader collects block file list from Namenode, writes to ZK for each Datanode worker  
-Workers linux-find then linux-cp local block files to a /.shred folder on the same partition, to maintain pointer to physical blocks once HDFS file is 'deleted', then update status in ZK  
-When all blockfiles are marked as copied, leader rechecks details are all valid  
-If details good, leader deletes file from HDFS, skipping trash, updates status in ZK  
-Workers then update status of blockfile copies in ZK ready for shredding  
+Leader collects block file list from Namenode, writes to numbered subdir of HDFS:/.shred for each Datanode worker, i.e HDFS:/.shred/#/DNName/blocklist, updates job status as ready for linux cp, starts polling DN status files for updates  
+Workers linux-find then linux-cp local block files to a ext4:/.shred folder on the same partition, to maintain pointer to physical blocks once HDFS file is 'deleted', then update status in HDFS:/.shred/#/DNName/status file  
+When all blockfiles are marked as copied, leader deletes the file from HDFS, updates job status  
+Workers then update status of their job in HDFS:/.shred/#/DNName/status as ready for shredding  
 
 ### Shredder
-Runs out-of-hours as shredding is resource intensive  
-Checks /.shred directory on each partition and shreds any files found to a set concurrency  
-Cleans up files held in /.shred directory and updates ZK with shredded status
+Intended to be scheudled out-of-hours as shredding is resource intensive  
+Checks for files ready for shredding and uses linux shred command to securely delete them  
+Finally updates HDFS:/.shred/#/DNName/status with shredded status
 
 ## Features
 * Managed via central config file.  
-* Logs all activity to local Syslog.  
-* [TODO]Uses ZooKeeper to track state of deletion and shredding actions.  
+* Logs all activity to Syslog.  
+* [TODO]Uses HDFS dir to track global job state of deletion and shredding actions.
+* [TODO]Uses local Linux dir to track local block shredding actions  
 * [TODO]Uses Linux cp pointer to maintain disk block ownership after HDFS delete
 * Uses hadoop fsck to get file blocks. 
 * [TODO]Uses HDFS Client to delete files.    
 * [TODO]Uses Linux shred command to destroy disk blocks.
 * [TODO]Integrates easily with Cron for scheduling
+
+
+## Considered limitations
+Block file locations in HDFS are dynamic; rebalancing and replication activities, for example, could move block files containing sensitive data through many locations before the data is shredded. As such, this utility only attempts to securely delete the locations of such blocks as could be reasonably found without application of extreme forensic techniques.  
+
+Unavailable Data Nodes; it is possibly and even likely that a Data Node may be offline temporarily or permanently when a file is scheduled for shredding. Furthermore, when that Data Node comes back online, HDFS would delete any block files without shredding before this daemon could intervene to shred them. It may be that there are grounds for a hook in the HDFS process of removing these blocks which can check a list of blocks to be shreded, and this might be a suitable feature request in future. At this time we do not attempt to directly resolve this corner case.
+
+Distributed vs Centralised process; In some architectures it may be preferable to run this process from a central MapReduce job rather than a set of distributed workers. This of course comes with its own challenges, most particularly executing remote shell commands on every DataNode. This implmentation is a distributed one because it suits the environment it is being designed for.
