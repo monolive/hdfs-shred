@@ -47,3 +47,10 @@ Block file locations in HDFS are dynamic; rebalancing and replication activities
 Unavailable Data Nodes; it is possibly and even likely that a Data Node may be offline temporarily or permanently when a file is scheduled for shredding. Furthermore, when that Data Node comes back online, HDFS would delete any block files without shredding before this daemon could intervene to shred them. It may be that there are grounds for a hook in the HDFS process of removing these blocks which can check a list of blocks to be shreded, and this might be a suitable feature request in future. At this time we do not attempt to directly resolve this corner case.
 
 Distributed vs Centralised process; In some architectures it may be preferable to run this process from a central MapReduce job rather than a set of distributed workers. This of course comes with its own challenges, most particularly executing remote shell commands on every DataNode. This implmentation is a distributed one because it suits the environment it is being designed for.
+
+
+## Versioning Notes
+0.0.1 Initial draft of logic using linux cp to maintain file control after hdfs delete
+0.0.2 Revised logic to run as async distributed service on all datanodes
+0.0.3 Revised to remove race condition of 0.0.2 by running distributed transaction via ZooKeeper
+0.0.4 Moved status and notes tracking out of ZooKeeper into HDFS to avoid melting ZK during large operations

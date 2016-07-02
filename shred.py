@@ -31,6 +31,8 @@ if test_mode:
     con_handler = logging.StreamHandler()
     log.addHandler(con_handler)
 
+### Begin Function definitions
+
 
 def parse_args(args):
     parser = argparse.ArgumentParser(
@@ -87,6 +89,7 @@ def run_shell_command(command):
 def check_hdfs_compat():
     """Checks if we can connect to HDFS and it's a tested version"""
     # TODO: Collect version number and pass back that or error
+    # TODO: Ensure the HDFS:/.shred directory is available to work with
     hdfs_compat_iter = run_shell_command(['hdfs', 'version'])
     result = False
     firstline = hdfs_compat_iter.next()   # Firstline should be version number if it works
@@ -221,6 +224,19 @@ def write_job_zk(job_id):
     pass
 
 
+def ingest_file_to_shred(target):
+    """Moves file from initial location to shred worker folder on HDFS and generates job management files"""
+    pass
+    # Create directory named with a guid, create status file of guid name in shred root with 'stage1prepare' in it
+    # Create subdirs for data and datanode
+    # update status to 'stage1ingesttargets'
+    # Move all files to the data directory
+    # update status to 'stage1complete'
+    # return status and job guid
+
+### End Function definitions
+
+
 def main():
     ### Program setup
     log.info("shred.py called with args [{0}]").format(sys.argv[1:])
@@ -237,64 +253,86 @@ def main():
         raise "Could not find HDFS, please check the HDFS client is installed and HDFS is available and try again."
     # Test for Zookeeper connectivity
     log.debug("Looking for ZooKeeper")
-    zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
-    zk = connect_zk(zk_host)                                  # Test Written
     ### End Program Setup
 
+### ver 0.0.4 process logic
     if args.mode is 'client':
-        log.debug("Detected that we're running in 'client' Mode")
-        # Test if target file exists on HDFS
-        log.debug("Checking if file exists in HDFS")
-        file_exists = check_hdfs_for_file(args.file_to_shred)                   # Test Written
-        if file_exists is not True:
-            raise "File for shredding not found on HDFS: [{0}]".format(args.file_to_shred)
-        else:
-            # File exists, now check if job already exists
-            status = check_job_status(args.file_to_shred)
-            if status is "JobNotFound":
-                # No job currently registered for this file, and file exists in HDFS
-                # TODO: Add confirmation dialogue using the canonical filepath to check we are targeting correct file
-                write_job_zk(args.file_to_shred)
+        if args.mode is 'client':
+            log.debug("Detected that we're running in 'client' Mode")
+            log.debug("Checking if file exists in HDFS")
+            file_exists = check_hdfs_for_file(args.file_to_shred)
+            if file_exists is not True:
+                raise "Submitted File not found on HDFS: [{0}]".format(args.file_to_shred)
             else:
-                # TODO: Manage other status codes
-                pass
-            status = check_job_status(args.file_to_shred)
-            if status is "JobFound":
-                log.debug("Job created, exiting with success")
-                print("Successfully created delete and shred job for file [{0}]".format(args.file_to_shred))
-                exit(0)
-            else:
-                # TODO: Manage other status codes
-                pass
+                # By using the client to move the file to the shred location we validate that the user has permissions
+                # to call for the delete and shred
+                ingest_result = ingest_file_to_shred(args.file_to_shred)
+                if ingest_result is not True:
+                    raise "Could not take control of submitted file: [{0}]".format(args.file_to_shred)
+                else:
+                    # TODO: Return a success flag and shred path for logging / display to user
+                    log.debug("Job created, exiting with success")
+                    print("Successfully created delete and shred job for file [{0}]".format(args.file_to_shred))
+                    exit(0)
     elif args.mode is 'worker':
         pass
-        # Foot Datanode:
-        # Check ZK for shred leader status, if leader keepalive not-ok, then run election
-        # Check own Datanode for jobs
-        # If job found, check in against job and begin prep:
-        # find listed blk files and validate that there is a shred dir available on partition for cp
-        # When validation completed, check in as ready to execute
-        # When Krang commands, cp all local blk files to shred dir on local partition and update status
-        # Check if Krang marks distributed job as successfully, if so, mark blks ready for shredding, else rollback - update status
-        # Check Next job, else sleep till next check interval
-
-        # If this Datanode is Krang, then:
-        # Get all jobs from ZK into a worklist
-        # If no jobs, update leader keepalive and sleep till next check interval
-        # if Jobs, check all datanodes available else alert
-        # For each job
-        # Check status of job
-        # if job ready for execute then get blocklist and write tasks for Foot Datanodes, update job status
-        # wait for all datanodes to check in as in preparation - use 2x sleep timer as checkin timeout for job failure and reset
-        # when all datanodes checked in as ready, prepare for distributed transaction
-        # command all Foot to execute cp, if all return success (including self), then run HDFS delete command, else raise alert and rollback
-        # if successful, update job status and wait for all Foot to confirm change to ready for shred status
-        # if all Foot confirm final status update, mark job as ready for The Shredder.
+        # wake from sleep mode
+        # check if there are new files in HDFS:/.shred indicating new jobs to be done
+        # if no new jobs, sleep
+        # else, check files for status
+        # if status is stage1complete, connect to ZK
+        zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
+        zk = connect_zk(zk_host)                                                # Test Written
+        # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
+        # if not get lease, pass, else:
+        # update job status to stage2prepareblocklist
+        # parse fsck for blocklist, write to hdfs job subdir for other workers to read 
+        # update job status to stage2copyblocks
+        # release lease
+        #
+        # if status is stage2copyblocks
+        # parse blocklist for job
+        # create tasklist file under DN subdir in job
+        # for each:
+        # find blockfiles on ext4
+        # create hardlink to .shred dir on same partition
+        # update tasklist file
+        # if all blocks copied, join ZK party under guid 
     elif args.mode is 'shredder':
         pass
     else:
-        raise "Bad operating mode [{0}] detected. Please consult program help and try again." \
-            .format(args.mode)
+        raise "Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode)
+
+
+    # elif args.mode is 'worker':
+    #     pass
+    #     # Foot Datanode:
+    #     # Check ZK for shred leader status, if leader keepalive not-ok, then run election
+    #     # Check own Datanode for jobs
+    #     # If job found, check in against job and begin prep:
+    #     # find listed blk files and validate that there is a shred dir available on partition for cp
+    #     # When validation completed, check in as ready to execute
+    #     # When Krang commands, cp all local blk files to shred dir on local partition and update status
+    #     # Check if Krang marks distributed job as successfully, if so, mark blks ready for shredding, else rollback - update status
+    #     # Check Next job, else sleep till next check interval
+    # 
+    #     # If this Datanode is Krang, then:
+    #     # Get all jobs from ZK into a worklist
+    #     # If no jobs, update leader keepalive and sleep till next check interval
+    #     # if Jobs, check all datanodes available else alert
+    #     # For each job
+    #     # Check status of job
+    #     # if job ready for execute then get blocklist and write tasks for Foot Datanodes, update job status
+    #     # wait for all datanodes to check in as in preparation - use 2x sleep timer as checkin timeout for job failure and reset
+    #     # when all datanodes checked in as ready, prepare for distributed transaction
+    #     # command all Foot to execute cp, if all return success (including self), then run HDFS delete command, else raise alert and rollback
+    #     # if successful, update job status and wait for all Foot to confirm change to ready for shred status
+    #     # if all Foot confirm final status update, mark job as ready for The Shredder.
+    # elif args.mode is 'shredder':
+    #     pass
+    # else:
+    #     raise "Bad operating mode [{0}] detected. Please consult program help and try again." \
+    #         .format(args.mode)
 
 ### ver 0.0.2 process logic, with race condition flaw
     # if args.mode is 'file':
