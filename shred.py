@@ -255,7 +255,6 @@ def main():
     log.debug("Looking for ZooKeeper")
     ### End Program Setup
 
-### ver 0.0.4 process logic
     if args.mode is 'client':
         if args.mode is 'client':
             log.debug("Detected that we're running in 'client' Mode")
@@ -284,98 +283,52 @@ def main():
         zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
         zk = connect_zk(zk_host)                                                # Test Written
         # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
+        # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
         # if not get lease, pass, else:
         # update job status to stage2prepareblocklist
         # parse fsck for blocklist, write to hdfs job subdir for other workers to read 
         # update job status to stage2copyblocks
         # release lease
         #
+        # Foreach job in subdirs
         # if status is stage2copyblocks
         # parse blocklist for job
+        # if blocks for this DN
+        # update DN status to Stage2running
         # create tasklist file under DN subdir in job
-        # for each:
-        # find blockfiles on ext4
+        # foreach blockfile in job:
+        # update tasklist file to finding
+        # find blockfile on ext4
+        # update tasklist file to copying
         # create hardlink to .shred dir on same partition
-        # update tasklist file
-        # if all blocks copied, join ZK party under guid 
+        # update tasklist file to copied
+        # When all blocks finished, update DN status to Stage2complete
+        #
+        # if all blocks copied, attempt lease of guid for 2x sleep period minutes, else sleep for 1x period minutes
+        # if lease:
+        # Update DN status to Stage2leaderactive
+        # periodically check status file of each DN against DNs in blocklist
+        # if DN not working within 2x sleep period minutes, alert
+        # if DN all working but not finished, update Dn status to Stage2leaderwait, short sleep
+        # if all DN report finished cp, update job status stage2readyfordelete
+        # run hdfs delete files -skiptrash, update status to stage2filesdeleted
+        # update central status as stage2complete, update Dn status as Stage2complete
+        # release lease, shutdown
     elif args.mode is 'shredder':
         pass
+        # wake on schedule
+        # Foreach job in subdir:
+        # if Stage2Complete
+        # Get DN tasklist for job
+        # Set DN status to Shredding for job
+        # Foreach blockfile:
+        # set status to shredding in tasklist
+        # run shred
+        # set status to shredded in tasklist
+        # when job complete, set DN status to Stage3complete
     else:
         raise "Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode)
 
-
-    # elif args.mode is 'worker':
-    #     pass
-    #     # Foot Datanode:
-    #     # Check ZK for shred leader status, if leader keepalive not-ok, then run election
-    #     # Check own Datanode for jobs
-    #     # If job found, check in against job and begin prep:
-    #     # find listed blk files and validate that there is a shred dir available on partition for cp
-    #     # When validation completed, check in as ready to execute
-    #     # When Krang commands, cp all local blk files to shred dir on local partition and update status
-    #     # Check if Krang marks distributed job as successfully, if so, mark blks ready for shredding, else rollback - update status
-    #     # Check Next job, else sleep till next check interval
-    # 
-    #     # If this Datanode is Krang, then:
-    #     # Get all jobs from ZK into a worklist
-    #     # If no jobs, update leader keepalive and sleep till next check interval
-    #     # if Jobs, check all datanodes available else alert
-    #     # For each job
-    #     # Check status of job
-    #     # if job ready for execute then get blocklist and write tasks for Foot Datanodes, update job status
-    #     # wait for all datanodes to check in as in preparation - use 2x sleep timer as checkin timeout for job failure and reset
-    #     # when all datanodes checked in as ready, prepare for distributed transaction
-    #     # command all Foot to execute cp, if all return success (including self), then run HDFS delete command, else raise alert and rollback
-    #     # if successful, update job status and wait for all Foot to confirm change to ready for shred status
-    #     # if all Foot confirm final status update, mark job as ready for The Shredder.
-    # elif args.mode is 'shredder':
-    #     pass
-    # else:
-    #     raise "Bad operating mode [{0}] detected. Please consult program help and try again." \
-    #         .format(args.mode)
-
-### ver 0.0.2 process logic, with race condition flaw
-    # if args.mode is 'file':
-    #     log.debug("Detected that we're running in 'File' Mode")
-    #     # Test if target file exists on HDFS
-    #     log.debug("Checking if file exists in HDFS")
-    #     file_exists = check_hdfs_for_file(args.file_to_shred)                   # Test Written
-    #     if file_exists is not True:
-    #         raise "File for shredding not found on HDFS: [{0}]".format(args.file_to_shred)
-    #     # Get block information for the file we are to shred
-    #     log.debug("Requesting FSCK information for file.")
-    #     fsck_output = get_fsck_output(args.file_to_shred)                       # Test Written
-    #     log.debug("Requesting parser to return clean dict of block files to shred")
-    #     # Parse HDFS fsck output into a dictionary of datanodes with lists of block IDs
-    #     blocks_dict_out = parse_blocks_from_fsck(fsck_output)                   # Test Written
-    #     # Store blocks to be shredded into Zookeeper
-    #     log.debug("Writing datanodes and blocks information to ZooKeeper for shredding workers")
-    #     blocklist_status = write_blocks_to_zk(zk, blocks_dict_out)                                 # Test Written
-    #     if blocklist_status is True:
-    #         del_status = delete_file_from_hdfs(args.file_to_shred)
-    #         if del_status is True:
-    #             log.info("File [{0}] loaded for Shredding and deleted from HDFS")
-    #             exit(0)
-    #     else:
-    #         raise StandardError("Failure to store HDFS file Blocklist to ZooKeeper for shredding, will not delete file.")
-    # elif args.mode is 'blocks':
-    #     log.debug("Detected that we're running in Block Shredding worker mode")
-    #     # Get my IP
-    #     log.debug("Determinging this DataNode's IP")
-    #     dn_id = get_datanode_ip()                                               # TODO: Write Test
-    #     # Get current blocks list from zk
-    #     log.debug("Getting list of block shredding tasks for this Datanode")
-    #     block_list_in = read_blocks_from_zk(zk, dn_id)                          # TODO: Write Test
-    #     # Parse Block Dict into task list
-    #     log.debug("Parsing block list into list of shredding tasks")
-    #     shred_task_iter = generate_shred_task_list(block_list_in)               # TODO: Write Test
-    #     # Execute Shred Processor
-    #     log.debug("Requesting shredding task execution")
-    #     shred_blocks(shred_task_iter)                                           # TODO: Write Test
-    # else:
-    #     raise "Bad operating mode [{0}] detected. Please retry by specifying mode of either 'file' or 'blocks'." \
-    #         .format(args.mode)
-### End ver 0.0.2 process logic
 
 if __name__ == "__main__":
     main()
