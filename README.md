@@ -1,5 +1,7 @@
 # hdfs-shred
-Proof of Concept linux-daemon for Hadoop: Shred files deleted from HDFS for audit compliance.  
+Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS for audit compliance.
+  Implented in Python2.x for native compaitbility with most Linux distributions.
+  Conceived as distributed collection of asynchronous workers coordinated via ZooKeeper and HDFS.
 With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.
 
 ## Summary

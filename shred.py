@@ -1,8 +1,8 @@
 #!/usr/bin/python
-# -*- coding: utf-8 -*-
+# coding: utf-8
 
 """
-Proof of Concept Hadoop to shred files deleted from HDFS for audit compliance.
+Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS for audit compliance.
 See https://github.com/Chaffleson/hdfs-shred
 """
 
@@ -13,9 +13,11 @@ import re
 import subprocess
 import sys
 import argparse
-import pickle
-from zlib import compress, decompress
+from uuid import uuid4
+from os.path import join as ospathjoin
+from os.path import dirname, abspath
 from kazoo.client import KazooClient
+from hdfs import Config
 
 from config import conf
 
@@ -30,6 +32,10 @@ log.addHandler(handler)
 if test_mode:
     con_handler = logging.StreamHandler()
     log.addHandler(con_handler)
+
+# Global Handles
+zk = None
+hdfs = None
 
 ### Begin Function definitions
 
@@ -49,13 +55,13 @@ def parse_args(args):
     result = parser.parse_args(args)
     if result.debug:
         log.setLevel(logging.DEBUG)
-    if result.mode is 'file' and result.filename is None:
+    if result.mode is 'client' and result.filename is None:
         log.error("Argparse found a bad arg combination, posting info and quitting")
-        parser.error("--mode 'file' requires a filename to register for shredding.")
-    if result.mode is 'blocks' and result.filename:
+        parser.error("--mode 'client' requires a filename to register for shredding.")
+    if result.mode in ['worker', 'shredder'] and result.filename:
         log.error("Argparse found a bad arg combination, posting info and quitting")
-        parser.error("--mode 'blocks' cannot be used to register a new filename for shredding."
-                     " Please try '--mode file' instead.")
+        parser.error("--mode 'worker' or 'shredder' cannot be used to register a new filename for shredding."
+                     " Please try '--mode client' instead.")
     log.debug("Argparsing complete, returning args to main function")
     return result
 
@@ -63,14 +69,28 @@ def parse_args(args):
 def connect_zk(host):
     """create connection to ZooKeeper"""
     log.debug("Connecting to Zookeeper using host param [{0}]".format(host))
+    global zk
     zk = KazooClient(hosts=host)
     zk.start()
     if zk.state is 'CONNECTED':
-        log.debug("Returning Zookeeper connection to main function")
+        log.debug("Asserting Zookeeper connection is live to main function")
         return zk
     else:
         raise "Could not connect to ZooKeeper with configuration string [{0}], resulting connection state was [{1}]"\
             .format(host, zk.state)
+
+
+def connect_hdfs():
+    """Uses HDFS client module to connect to HDFS
+    returns handle object"""
+    log.debug("Instatiating HDFS client")
+    # TODO: Write try/catch for connection errors and states
+    global hdfs
+    hdfs = Config(dirname(__file__) + "/config/hdfscli.cfg").get_client()
+    if hdfs:
+        return hdfs
+    else:
+        return False
 
 
 def run_shell_command(command):
@@ -86,37 +106,20 @@ def run_shell_command(command):
     return iter(p.stdout.readline, b'')
 
 
-def check_hdfs_compat():
-    """Checks if we can connect to HDFS and it's a tested version"""
-    # TODO: Collect version number and pass back that or error
-    # TODO: Ensure the HDFS:/.shred directory is available to work with
-    hdfs_compat_iter = run_shell_command(['hdfs', 'version'])
-    result = False
-    firstline = hdfs_compat_iter.next()   # Firstline should be version number if it works
-    for vers in conf.COMPAT:
-        if vers in firstline:
-            result = True
-    return result
-
-
-def check_hdfs_for_file(target):
+def check_hdfs_for_target(target):
     """
     Checks if file requested for shredding actually exists on HDFS.
     Returns True if file is Found.
     Returns Error details if it is not found.
     """
     # TODO: Return canonical path from LS command rather than trusting user input
-    log.debug("Checking validity of HDFS File target [{0}]".format(target))
-    file_check_isDir = subprocess.call(['hdfs', 'dfs', '-test', '-d', target])
-    log.debug("File Check isDir returned [{0}]".format(file_check_isDir))
-    if file_check_isDir is 0:   # Returns 0 on success
-        raise ValueError("Target [{0}] is a directory.".format(target))
-    file_check_isFile = subprocess.call(['hdfs', 'dfs', '-test', '-e', target])
-    log.debug("File Check isFile returned [{0}]".format(file_check_isFile))
-    if file_check_isFile is not 0:    # Returns 0 on success
-        raise ValueError("Target [{0}]: File not found.".format(target))
-    else:
+    log.debug("Checking validity of HDFS target [{0}]".format(target))
+    target_details = hdfs.status(target, strict=False)
+    log.debug("HDFS status is: [{0}]".format(target_details))
+    if target_details is not None and target_details['type'] == u'FILE':
         return True
+    else:
+        return False
 
 
 def get_fsck_output(target):
@@ -149,90 +152,53 @@ def parse_blocks_from_fsck(raw_fsck):
     return output
 
 
-def write_blocks_to_zk(zk_conn, data):
-    """Write block to be deleted to zookeeper"""
-    log.debug("ZK Writer passed blocklists for [{0}] Datanodes to shred".format(len(data)))
-    for datanode_ip in data:
-        log.debug("Processing blocklist for Datanode [{0}]".format(datanode_ip))
-        zk_path_dn = conf.ZOOKEEPER['PATH'] + datanode_ip
-        zk_conn.ensure_path(zk_path_dn)
-        zk_conn.create(
-            path=zk_path_dn + '/blocklist',
-            value=compress(pickle.dumps(data[datanode_ip]))
-        )
-        zk_conn.create(
-            path=zk_path_dn + '/status',
-            value='file_not_deleted_blocklist_written'
-        )
-    log.debug("List of DN Blocklists written to ZK: [{0}]".format(zk_conn.get_children(conf.ZOOKEEPER['PATH'])))
-    # TODO: Test ZK nodes are all created as expected
-    # TODO: Handle existing ZK nodes
-    return True
-
-
-def delete_file_from_hdfs(target):
-    """Uses HDFS Client to delete the file from HDFS
-    Returns a Bool result"""
-    return True
-
-
-def get_datanode_ip():
-    """Returns the IP of this Datanode"""
-    # TODO: Write this function to return more than a placeholder
-    return "127.0.0.1"
-
-
-def read_blocks_from_zk(zk_conn, dn_id):
-    """
-    Read blocks to be deleted from Zookeeper
-    Requires active ZooKeeper connection and the datanode-ID as it's IP as a string
-    """
-    # TODO: Check dn_id is valid
-    log.debug("Attempting to read blocklist for Datanode [{0}]".format(dn_id))
-    zk_path_dn = conf.ZOOKEEPER['PATH'] + dn_id
-    dn_status = zk_conn.get(zk_path_dn + '/status')
-    if dn_status[0] is 'file_not_deleted_blocklist_written':
-        dn_node = zk_conn.get(zk_path_dn + '/blocklist')
-        blocklist = pickle.loads(decompress(dn_node[0]))
-        return blocklist
+def set_status(job_id, component, status):
+    """Abstracts setting a given status for a given job, job subcomponent, and status message"""
+    # determine file to be written
+    path = ""
+    if component == "master":
+        path = ospathjoin(conf.HDFS_SHRED_PATH, job_id)
     else:
-        raise ValueError("Blocklist Status for this DN is not as expected at [{0}]".format(zk_path_dn + '/status'))
+        path = ospathjoin(conf.HDFS_SHRED_PATH, job_id, component) 
+    # Ensure directory structure
+    hdfs.makedirs(path)
+    # Write status file
+    hdfs.write(ospathjoin(path, "status"), status, overwrite=True)
 
 
-def generate_shred_task_list(block_list):
-    """Generate list of tasks of blocks to shred for this host"""
-    # TODO: Write this function to return more than a placeholder
-    output = {}
-    return output
-
-
-def shred_blocks(blocks):
-    """Reliable shred process to ensure blocks are truly gone baby gone"""
-    # TODO: Write this function to return more than a placeholder
-    # TODO: Keep tracked of deleted block / files
-    pass
-
-
-def check_job_status(job_id):
-    """Checks for job status in ZK and returns meaningful codes"""
-    # TODO: return 'JobNotFound' if file is not listed in ZK
-    pass
-
-
-def write_job_zk(job_id):
-    """Writes the filepath to ZK as a new delete/shred job"""
-    pass
-
-
-def ingest_file_to_shred(target):
-    """Moves file from initial location to shred worker folder on HDFS and generates job management files"""
-    pass
-    # Create directory named with a guid, create status file of guid name in shred root with 'stage1prepare' in it
-    # Create subdirs for data and datanode
-    # update status to 'stage1ingesttargets'
-    # Move all files to the data directory
-    # update status to 'stage1complete'
+def prepare_job(target):
+    """and generates job management files and dirs"""
+    status = 'stage1init'
+    component = 'master'
+    # Generate a guid for a job ID
+    job_id = str(uuid4())
+    log.debug("Generated uuid [{0}] for job identification".format(job_id))
+    # Create directory named with a guid, create an initial status file in it
+    set_status(job_id, component, status)
+    # Create subdir for data
+    component = 'data'
+    set_status(job_id, component, status)
     # return status and job guid
+    return (job_id, status)
+
+
+def ingest_targets(job_id, target):
+    """Moves file from initial location to shred worker folder on HDFS"""
+    # Update status'
+    status = "stage1ingest"
+    component = "master"
+    set_status(job_id, component, status)
+    component = "data"
+    set_status(job_id, component, status)
+    # Move all files to the data directory
+    path = ospathjoin(conf.HDFS_SHRED_PATH, job_id, 'data')
+    # Using the HDFS module's rename function to move the target files
+    log.debug("Moving target file [{0}] to shredder holding pen [{1}]".format(target, path))
+    hdfs.rename(target, path)
+    # update status
+    status = "stage1ingestComplete"
+    set_status(job_id, component, status)
+    return (job_id, status)
 
 ### End Function definitions
 
@@ -249,29 +215,41 @@ def main():
         raise "Config from config.py not found, please check configuration file is available and try again."
     # Test necessary connections
     log.debug("Checking if we can find the HDFS client and HDFS instance to connect to.")
-    if not check_hdfs_compat:                                                   # Test Written
-        raise "Could not find HDFS, please check the HDFS client is installed and HDFS is available and try again."
-    # Test for Zookeeper connectivity
-    log.debug("Looking for ZooKeeper")
+    hdfs_connected = connect_hdfs()
+    if not hdfs_connected:
+        raise "Unable to connect to HDFS, please check your configuration and retry"
+    # Check directories etc. are setup
+    hdfs.makedirs(conf.HDFS_SHRED_PATH)
+    # TODO: Further Application setup tests
     ### End Program Setup
 
     if args.mode is 'client':
-        if args.mode is 'client':
-            log.debug("Detected that we're running in 'client' Mode")
-            log.debug("Checking if file exists in HDFS")
-            file_exists = check_hdfs_for_file(args.file_to_shred)
-            if file_exists is not True:
-                raise "Submitted File not found on HDFS: [{0}]".format(args.file_to_shred)
+        log.debug("Detected that we're running in 'client' Mode")
+        # forcing target to be absolute pathed for safety
+        target = abspath(args.file_to_shred)
+        log.debug("Checking if file exists in HDFS")
+        target_exists = check_hdfs_for_target(target)
+        if target_exists is not True:
+            raise "Submitted File not found on HDFS: [{0}]".format(target)
+        else:
+            # By using the client to move the file to the shred location we validate that the user has permissions
+            # to call for the delete and shred
+            job_id, job_status = prepare_job(target)
+            if 'stage1init' not in job_status:
+                raise "Could not create job for file: [{0}]".format(target)
             else:
-                # By using the client to move the file to the shred location we validate that the user has permissions
-                # to call for the delete and shred
-                ingest_result = ingest_file_to_shred(args.file_to_shred)
-                if ingest_result is not True:
-                    raise "Could not take control of submitted file: [{0}]".format(args.file_to_shred)
+                log.info("Created job id [{0}] for target [{1}]. Current status: [{2}]".format(
+                    job_id, target, job_status
+                ))
+                job_id, status = ingest_targets(job_id, target)
+                if status != "stage1ingestComplete":
+                    raise "Ingestion failed for target file [{0}] for job [{1}], please see log and status files for details".format(target, job_id)
                 else:
-                    # TODO: Return a success flag and shred path for logging / display to user
-                    log.debug("Job created, exiting with success")
-                    print("Successfully created delete and shred job for file [{0}]".format(args.file_to_shred))
+                    component = "master"
+                    status = "stage1complete"
+                    set_status(job_id, component, status)
+                    log.debug("Job [{0}] prepared, exiting with success".format(job_id))
+                    print("Successfully created Secure Delete job for file [{0}]".format(target))
                     exit(0)
     elif args.mode is 'worker':
         pass

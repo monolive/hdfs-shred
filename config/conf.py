@@ -4,12 +4,12 @@
 
 VERSION = "0.0.4"
 
-COMPAT = [
-    "2.7.1.2.4.0.0-169",
-]
-
 ZOOKEEPER = {
     'HOST': 'localhost',
     'PORT': 2181,
     'PATH': '/shred/'
 }
+
+HDFS_SHRED_PATH = "/tmp/shred"
+
+LINUXFS_SHRED_PATH = ".shred"

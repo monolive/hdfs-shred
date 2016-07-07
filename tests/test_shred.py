@@ -51,6 +51,7 @@ def setup_module():
                 shred.log.info(line)
     # get test files
     shred.log.info("Getting list of Test Files")
+    global test_files
     filelist_cmd = ["hdfs", "dfs", "-ls", join(test_file_path, test_file_name)]
     filelist_iter = shred.run_shell_command(filelist_cmd)
     for line in filelist_iter:
@@ -74,34 +75,33 @@ def teardown_module():
     if remove_test_zkdata:
         shred.log.info("Removing test ZK Data")
         zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
-        zk_conn = shred.connect_zk(zk_host)
-        zk_conn.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
+        zk = shred.connect_zk(zk_host)
+        zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
     else:
         shred.log.info("Skipping removal of test ZK Data")
 
-
+@pytest.mark.slow
 def test_parse_args():
     shred.log.info("Testing argparse")
-    out = shred.parse_args(["-m", "file", "-f", "somefile"])
+    out = shred.parse_args(["-m", "client", "-f", "somefile"])
     assert out.filename == "somefile"
-    assert out.mode == "file"
-    out = shred.parse_args(["-m", "blocks"])
-    assert out.mode == "blocks"
+    assert out.mode == "client"
+    out = shred.parse_args(["-m", "worker"])
+    assert out.mode == "worker"
+    assert out.filename is None
+    out = shred.parse_args(["-m", "shredder"])
+    assert out.mode == "shredder"
+    assert out.filename is None
     with pytest.raises(SystemExit):
         out = shred.parse_args(["-m", "file"])
+    with pytest.raises(SystemExit):
+        out = shred.parse_args(["-m", "worker", "-f", "somefile"])
     with pytest.raises(SystemExit):
         out = shred.parse_args(["-v"])
     with pytest.raises(SystemExit):
         out = shred.parse_args(["-h"])
 
-
-def test_check_hdfs_compat():
-    shred.log.info("Testing HDFS Compatibility - Placeholder")
-    # TODO: Write more meaningful test for this function
-    out = shred.check_hdfs_compat()
-    assert out == True
-
-
+@pytest.mark.slow
 def test_connect_zk():
     shred.log.info("Testing ZooKeeper connector")
     # Bad Host
@@ -112,26 +112,13 @@ def test_connect_zk():
     zk = shred.connect_zk(zk_host)
     assert zk.state == 'CONNECTED'
 
-
-def test_check_hdfs_for_file():
-    shred.log.info("Testing HDFS File checker")
-    # Test good file
-    out = shred.check_hdfs_for_file(test_files[-1])
-    assert out is True
-    # Test bad file
-    with pytest.raises(ValueError):
-        shred.check_hdfs_for_file('/tmp/notafile')
-    # test passing a dir
-    with pytest.raises(ValueError):
-        shred.check_hdfs_for_file('/tmp')
-
-
+@pytest.mark.slow
 def test_get_fsck_output():
     shred.log.info("Testing FSCK information fetcher")
     out = shred.get_fsck_output(test_files[-1])
     assert isinstance(out, collections.Iterator)
 
-
+@pytest.mark.slow
 def test_parse_blocks_from_fsck():
     shred.log.info("Testing FSCK parser")
     fsck_content = shred.get_fsck_output(test_files[-1])
@@ -139,12 +126,35 @@ def test_parse_blocks_from_fsck():
     assert isinstance(out, dict)
     # TODO: Test dictionary entries for IP and list of blk_<num> entries
 
+@pytest.mark.slow
+def test_connect_hdfs():
+    shred.log.info("Testing Connection to HDFS")
+    hdfs = shred.connect_hdfs()
+    # TODO: Write tests here
 
-def test_write_blocks_to_zk():
-    shred.log.info("Testing ZooKeeper blocklist writer")
-    zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
-    zk_conn = shred.connect_zk(zk_host)
-    fsck_content = shred.get_fsck_output(test_files[-1])
-    blocklist = shred.parse_blocks_from_fsck(fsck_content)
-    shred.write_blocks_to_zk(zk_conn, blocklist)
-    # TODO: Test that blocks sent to function are written as expected
+@pytest.mark.slow
+def test_check_hdfs_for_target():
+    shred.log.info("Testing HDFS File checker")
+    hdfs = shred.connect_hdfs()
+    # Test good file
+    out = shred.check_hdfs_for_target(test_files[-1])
+    assert out is True
+    # Test bad file
+    out = shred.check_hdfs_for_target('/tmp/notafile')
+    assert out is False
+    # test passing a dir
+    out = shred.check_hdfs_for_target('/tmp')
+    assert out is False
+
+
+def test_prepare_and_ingest_job():
+    shred.log.info("Testing Job Preparation Logic")
+    hdfs = shred.connect_hdfs()
+    job_id, job_status = shred.prepare_job(test_files[-1])
+    assert job_id is not None
+    assert job_status == "stage1init"
+
+    shred.log.info("Testing Target File Ingest")
+    job_id, job_status = shred.ingest_targets(job_id, test_files[-1])
+    assert job_id is not None
+    assert job_status == "stage1complete"
