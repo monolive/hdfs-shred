@@ -14,6 +14,7 @@ import subprocess
 import sys
 import argparse
 from uuid import uuid4
+from socket import gethostname
 from os.path import join as ospathjoin
 from os.path import dirname, abspath
 from kazoo.client import KazooClient
@@ -24,7 +25,7 @@ from config import conf
 # Set to True to enhance logging when working in a development environment
 test_mode = True
 
-log = logging.getLogger(__file__)
+log = logging.getLogger('apriloneil')
 log.setLevel(logging.INFO)
 handler = logging.handlers.SysLogHandler(address='/dev/log')
 handler.setFormatter(RFC5424Formatter())
@@ -66,8 +67,10 @@ def parse_args(args):
     return result
 
 
-def connect_zk(host):
+def connect_zk():
     """create connection to ZooKeeper"""
+    # Construct Host from Config
+    host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
     log.debug("Connecting to Zookeeper using host param [{0}]".format(host))
     global zk
     zk = KazooClient(hosts=host)
@@ -83,14 +86,14 @@ def connect_zk(host):
 def connect_hdfs():
     """Uses HDFS client module to connect to HDFS
     returns handle object"""
-    log.debug("Instatiating HDFS client")
+    log.debug("Atempting to instantiate HDFS client")
     # TODO: Write try/catch for connection errors and states
     global hdfs
     hdfs = Config(dirname(__file__) + "/config/hdfscli.cfg").get_client()
     if hdfs:
         return hdfs
     else:
-        return False
+        raise "Unable to connect to HDFS, please check your configuration and retry"
 
 
 def run_shell_command(command):
@@ -102,7 +105,6 @@ def run_shell_command(command):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT
         )
-    log.debug("Returning iterable to calling function")
     return iter(p.stdout.readline, b'')
 
 
@@ -157,23 +159,23 @@ def set_status(job_id, component, status):
     # determine file to be written
     path = ""
     if component == "master":
-        path = ospathjoin(conf.HDFS_SHRED_PATH, job_id)
+        # The master component always updates the state of the job in the master job list
+        filepath = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", job_id)
     else:
-        path = ospathjoin(conf.HDFS_SHRED_PATH, job_id, component) 
-    # Ensure directory structure
-    hdfs.makedirs(path)
-    # Write status file
-    hdfs.write(ospathjoin(path, "status"), status, overwrite=True)
+        # otherwise we update the file named for that component in the subdir for the job in the general store
+        filepath = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, component, "status")
+    log.debug("Setting status of component [{0}] at path [{1}] to [{2}]".format(component, filepath, status))
+    hdfs.write(filepath, status, overwrite=True)
 
 
 def prepare_job(target):
     """and generates job management files and dirs"""
-    status = 'stage1init'
-    component = 'master'
     # Generate a guid for a job ID
     job_id = str(uuid4())
+    status = 'stage1init'
+    component = 'master'
     log.debug("Generated uuid [{0}] for job identification".format(job_id))
-    # Create directory named with a guid, create an initial status file in it
+    # Create directory named with a guid, create an initial status file in it for tracking this job
     set_status(job_id, component, status)
     # Create subdir for data
     component = 'data'
@@ -191,7 +193,7 @@ def ingest_targets(job_id, target):
     component = "data"
     set_status(job_id, component, status)
     # Move all files to the data directory
-    path = ospathjoin(conf.HDFS_SHRED_PATH, job_id, 'data')
+    path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, 'data')
     # Using the HDFS module's rename function to move the target files
     log.debug("Moving target file [{0}] to shredder holding pen [{1}]".format(target, path))
     hdfs.rename(target, path)
@@ -199,6 +201,41 @@ def ingest_targets(job_id, target):
     status = "stage1ingestComplete"
     set_status(job_id, component, status)
     return (job_id, status)
+
+
+def finalise_client(job_id, target):
+    component = "master"
+    status = "stage1complete"
+    set_status(job_id, component, status)
+    log.debug("Job [{0}] prepared, exiting with success".format(job_id))
+    print("Successfully created Secure Delete job for file [{0}]".format(target))
+    return True
+
+
+def get_worker_identity():
+    """Determines a unique identity string to use for this worker"""
+    id = gethostname()
+    return id
+
+
+def check_for_new_worker_jobs():
+    """Checks for the existance of new worker jobs and returns a list of them if they exist"""
+    worker_job_list = []
+    # check if dir exists as worker my load before client is ever used
+    job_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs")
+    job_dir_exists = hdfs.content(job_path, strict=False)
+    if job_dir_exists is not None:
+        # if job dir exists, get listing and any files
+        dirlist = hdfs.list(job_path, status=True)
+        for item in dirlist:
+            if item[1]['type'] == 'FILE':
+                with hdfs.read(ospathjoin(job_path, item[0])) as reader:
+                    job_status = reader.read()
+                # if file contains the completion status for stage1, put it in worker list
+                if job_status == "stage1complete":
+                    worker_job_list.append(item[0])
+    return worker_job_list
+
 
 ### End Function definitions
 
@@ -214,10 +251,7 @@ def main():
     if not conf.VERSION:
         raise "Config from config.py not found, please check configuration file is available and try again."
     # Test necessary connections
-    log.debug("Checking if we can find the HDFS client and HDFS instance to connect to.")
-    hdfs_connected = connect_hdfs()
-    if not hdfs_connected:
-        raise "Unable to connect to HDFS, please check your configuration and retry"
+    connect_hdfs()
     # Check directories etc. are setup
     hdfs.makedirs(conf.HDFS_SHRED_PATH)
     # TODO: Further Application setup tests
@@ -245,29 +279,36 @@ def main():
                 if status != "stage1ingestComplete":
                     raise "Ingestion failed for target file [{0}] for job [{1}], please see log and status files for details".format(target, job_id)
                 else:
-                    component = "master"
-                    status = "stage1complete"
-                    set_status(job_id, component, status)
-                    log.debug("Job [{0}] prepared, exiting with success".format(job_id))
-                    print("Successfully created Secure Delete job for file [{0}]".format(target))
-                    exit(0)
+                    ready_for_exit = finalise_client(job_id, target)
+                    if ready_for_exit:
+                        exit(0)
+                    else:
+                        raise StandardError("Unexpected program exit status, please refer to logs")
     elif args.mode is 'worker':
-        pass
+        # Determine identity
+        worker_id = get_worker_identity()
         # wake from sleep mode
-        # check if there are new files in HDFS:/.shred indicating new jobs to be done
-        # if no new jobs, sleep
-        # else, check files for status
-        # if status is stage1complete, connect to ZK
-        zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
-        zk = connect_zk(zk_host)                                                # Test Written
-        # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
-        # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
-        # if not get lease, pass, else:
-        # update job status to stage2prepareblocklist
-        # parse fsck for blocklist, write to hdfs job subdir for other workers to read 
-        # update job status to stage2copyblocks
-        # release lease
-        #
+        log.info("Worker [{0}] activating".format(worker_id))
+        # Establishing HDFS connection
+        connect_hdfs()
+        # check if there are jobs to be done
+        worklist = check_for_new_worker_jobs()
+        # if no new do next section
+        if len(worklist) > 0:
+            log.info("New jobs found: [{0}]".format(worklist))
+            # connect to ZK
+            zk = connect_zk() 
+            # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
+            # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
+            # if not get lease, pass, else:
+            # update job status to stage2prepareblocklist
+            # parse fsck for blocklist, write to hdfs job subdir for other workers to read 
+            # update job status to stage2copyblocks
+            # release lease
+        else:
+            log.info("No new jobs found")
+            pass
+        # check DN subdirs for active jobs
         # Foreach job in subdirs
         # if status is stage2copyblocks
         # parse blocklist for job
@@ -304,6 +345,7 @@ def main():
         # run shred
         # set status to shredded in tasklist
         # when job complete, set DN status to Stage3complete
+        # Move job from incomplete to completed
     else:
         raise "Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode)
 

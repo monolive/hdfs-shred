@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from os.path import join
+from os.path import join as ospathjoin
 from glob import glob
 from shlex import split as ssplit
 import argparse
@@ -15,7 +15,7 @@ import collections
 
 test_file_size = "10"
 test_file_path = "/tmp/"
-test_file_name = "shred_test_file"
+test_file_dir = "shred_test_file"
 test_files = []
 
 # Test control Params
@@ -30,21 +30,25 @@ shred.conf.ZOOKEEPER['PATH'] = '/shredtest/'
 def setup_module():
     shred.log.info("Begin Setup")
     # Check if test data already exists
-    test_data_exists_cmd = ["hdfs", "dfs", "-stat", join(test_file_path, test_file_name)]
+    test_data_exists_cmd = ["hdfs", "dfs", "-ls", ospathjoin(test_file_path, test_file_dir)]
     test_data_exists_iter = shred.run_shell_command(test_data_exists_cmd)
-    test_data_exists_resp = next(test_data_exists_iter)
-    if "No such file or directory" in test_data_exists_resp:
+    try:
+        out = next(test_data_exists_iter)
+        if "No such file or directory" in out:
+            test_data_exists_state = False
+        else:
+            test_data_exists_state = True
+    except StopIteration:
         test_data_exists_state = False
-        shred.log.info("Test Data not Found")
-    else:
-        test_data_exists_state = True
-        shred.log.info("Test Data already exists")
+
     if test_data_exists_state is False:
         # Generate test data
         shred.log.info("Generating Test Data...")
+        clean_dir_cmd = ["hdfs", "dfs", "-rmdir", ospathjoin(test_file_path, test_file_dir)]
+        shred.run_shell_command(clean_dir_cmd)
         gen_test_data_cmd = ["/usr/hdp/current/hadoop-client/bin/hadoop", "jar",
-                   glob("/usr/hdp/current/hadoop-mapreduce-client/hadoop-mapreduce-examples-*.jar")[0],
-                   "teragen", test_file_size, join(test_file_path, test_file_name)]
+                             glob("/usr/hdp/current/hadoop-mapreduce-client/hadoop-mapreduce-examples-*.jar")[0],
+                   "teragen", test_file_size, ospathjoin(test_file_path, test_file_dir)]
         gen_test_data_iter = shred.run_shell_command(gen_test_data_cmd)
         for line in gen_test_data_iter:
             if "Bytes Written" in line:
@@ -52,11 +56,11 @@ def setup_module():
     # get test files
     shred.log.info("Getting list of Test Files")
     global test_files
-    filelist_cmd = ["hdfs", "dfs", "-ls", join(test_file_path, test_file_name)]
+    filelist_cmd = ["hdfs", "dfs", "-ls", ospathjoin(test_file_path, test_file_dir)]
     filelist_iter = shred.run_shell_command(filelist_cmd)
     for line in filelist_iter:
         splits = ssplit(line)
-        if "{0}".format(join(test_file_path, test_file_name)) in splits[-1]:
+        if "{0}".format(ospathjoin(test_file_path, test_file_dir)) in splits[-1]:
             test_files.append(splits[-1])
     print test_files
 
@@ -66,7 +70,7 @@ def teardown_module():
     # Remove test data
     if remove_test_files:
         shred.log.info("Removing Test Data")
-        rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", join(test_file_path, test_file_name)]
+        rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", ospathjoin(test_file_path, test_file_dir)]
         rmdir_iter = shred.run_shell_command(rmdir_cmd)
         for line in rmdir_iter:
             shred.log.info(line)
@@ -75,12 +79,12 @@ def teardown_module():
     if remove_test_zkdata:
         shred.log.info("Removing test ZK Data")
         zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
-        zk = shred.connect_zk(zk_host)
+        zk = shred.connect_zk()
         zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
     else:
         shred.log.info("Skipping removal of test ZK Data")
 
-@pytest.mark.slow
+
 def test_parse_args():
     shred.log.info("Testing argparse")
     out = shred.parse_args(["-m", "client", "-f", "somefile"])
@@ -101,24 +105,20 @@ def test_parse_args():
     with pytest.raises(SystemExit):
         out = shred.parse_args(["-h"])
 
-@pytest.mark.slow
+
 def test_connect_zk():
     shred.log.info("Testing ZooKeeper connector")
-    # Bad Host
-    with pytest.raises(KazooTimeoutError):
-        out = shred.connect_zk('badhost:25531')
     # Good host
-    zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
-    zk = shred.connect_zk(zk_host)
+    zk = shred.connect_zk()
     assert zk.state == 'CONNECTED'
 
-@pytest.mark.slow
+
 def test_get_fsck_output():
     shred.log.info("Testing FSCK information fetcher")
     out = shred.get_fsck_output(test_files[-1])
     assert isinstance(out, collections.Iterator)
 
-@pytest.mark.slow
+
 def test_parse_blocks_from_fsck():
     shred.log.info("Testing FSCK parser")
     fsck_content = shred.get_fsck_output(test_files[-1])
@@ -126,13 +126,13 @@ def test_parse_blocks_from_fsck():
     assert isinstance(out, dict)
     # TODO: Test dictionary entries for IP and list of blk_<num> entries
 
-@pytest.mark.slow
+
 def test_connect_hdfs():
     shred.log.info("Testing Connection to HDFS")
     hdfs = shred.connect_hdfs()
     # TODO: Write tests here
 
-@pytest.mark.slow
+
 def test_check_hdfs_for_target():
     shred.log.info("Testing HDFS File checker")
     hdfs = shred.connect_hdfs()
@@ -157,4 +157,6 @@ def test_prepare_and_ingest_job():
     shred.log.info("Testing Target File Ingest")
     job_id, job_status = shred.ingest_targets(job_id, test_files[-1])
     assert job_id is not None
-    assert job_status == "stage1complete"
+    assert job_status == "stage1ingestComplete"
+    
+    shred.finalise_client(job_id, test_files[-1])
