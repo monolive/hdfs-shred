@@ -38,7 +38,7 @@ if test_mode:
 zk = None
 hdfs = None
 
-### Begin Function definitions
+# Begin Function definitions
 
 
 def parse_args(args):
@@ -93,7 +93,7 @@ def connect_hdfs():
     if hdfs:
         return hdfs
     else:
-        raise "Unable to connect to HDFS, please check your configuration and retry"
+        raise StandardError("Unable to connect to HDFS, please check your configuration and retry")
 
 
 def run_shell_command(command):
@@ -157,18 +157,20 @@ def parse_blocks_from_fsck(raw_fsck):
 def set_status(job_id, component, status):
     """Abstracts setting a given status for a given job, job subcomponent, and status message"""
     # determine file to be written
-    path = ""
     if component == "master":
         # The master component always updates the state of the job in the master job list
-        filepath = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", job_id)
+        file_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", job_id)
     else:
         # otherwise we update the file named for that component in the subdir for the job in the general store
-        filepath = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, component, "status")
-    log.debug("Setting status of component [{0}] at path [{1}] to [{2}]".format(component, filepath, status))
-    hdfs.write(filepath, status, overwrite=True)
+        file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, component, "status")
+    log.debug("Setting status of component [{0}] at path [{1}] to [{2}]".format(component, file_path, status))
+    if file_path is not None:
+        hdfs.write(file_path, status, overwrite=True)
+    else:
+        raise ValueError("File Path to set job status not set.")
 
 
-def prepare_job(target):
+def prepare_job():
     """and generates job management files and dirs"""
     # Generate a guid for a job ID
     job_id = str(uuid4())
@@ -181,7 +183,7 @@ def prepare_job(target):
     component = 'data'
     set_status(job_id, component, status)
     # return status and job guid
-    return (job_id, status)
+    return job_id, status
 
 
 def ingest_targets(job_id, target):
@@ -200,7 +202,7 @@ def ingest_targets(job_id, target):
     # update status
     status = "stage1ingestComplete"
     set_status(job_id, component, status)
-    return (job_id, status)
+    return job_id, status
 
 
 def finalise_client(job_id, target):
@@ -214,8 +216,8 @@ def finalise_client(job_id, target):
 
 def get_worker_identity():
     """Determines a unique identity string to use for this worker"""
-    id = gethostname()
-    return id
+    worker_id = gethostname()
+    return worker_id
 
 
 def check_for_new_worker_jobs():
@@ -237,11 +239,11 @@ def check_for_new_worker_jobs():
     return worker_job_list
 
 
-### End Function definitions
+# End Function definitions
 
 
 def main():
-    ### Program setup
+    # Program setup
     log.info("shred.py called with args [{0}]").format(sys.argv[1:])
     # Get invoke parameters
     log.debug("Parsing args using Argparse module.")
@@ -249,13 +251,15 @@ def main():
     # Checking the config was pulled in
     log.debug("Checking for config parameters.")
     if not conf.VERSION:
-        raise "Config from config.py not found, please check configuration file is available and try again."
+        raise StandardError(
+            "Version number in config.py not found, please check configuration file is available and try again."
+        )
     # Test necessary connections
     connect_hdfs()
     # Check directories etc. are setup
     hdfs.makedirs(conf.HDFS_SHRED_PATH)
     # TODO: Further Application setup tests
-    ### End Program Setup
+    # End Program Setup
 
     if args.mode is 'client':
         log.debug("Detected that we're running in 'client' Mode")
@@ -268,7 +272,7 @@ def main():
         else:
             # By using the client to move the file to the shred location we validate that the user has permissions
             # to call for the delete and shred
-            job_id, job_status = prepare_job(target)
+            job_id, job_status = prepare_job()
             if 'stage1init' not in job_status:
                 raise "Could not create job for file: [{0}]".format(target)
             else:
@@ -277,7 +281,10 @@ def main():
                 ))
                 job_id, status = ingest_targets(job_id, target)
                 if status != "stage1ingestComplete":
-                    raise "Ingestion failed for target file [{0}] for job [{1}], please see log and status files for details".format(target, job_id)
+                    raise StandardError(
+                        "Ingestion failed for file [{0}] for job [{1}], please see log and status files for details"
+                        .format(target, job_id)
+                    )
                 else:
                     ready_for_exit = finalise_client(job_id, target)
                     if ready_for_exit:
@@ -297,12 +304,12 @@ def main():
         if len(worklist) > 0:
             log.info("New jobs found: [{0}]".format(worklist))
             # connect to ZK
-            zk = connect_zk() 
+            zk = connect_zk()
             # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
             # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
             # if not get lease, pass, else:
             # update job status to stage2prepareblocklist
-            # parse fsck for blocklist, write to hdfs job subdir for other workers to read 
+            # parse fsck for blocklist, write to hdfs job subdir for other workers to read
             # update job status to stage2copyblocks
             # release lease
         else:
@@ -352,4 +359,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
