@@ -11,6 +11,14 @@ Uses a three-phase approach to the secure shredding of files in HDFS, which matc
 * A worker (Foot Soldiers); to run on each Datanode, which coordinates deleting the file from HDFS while also reserving the physical sections of disk the file resided on for later shredding
 * The Shredder; to run on each Datanode out-of-hours, and 'shred' the sections of disk which held the data before returning them to use in the filesystem
 
+## Configuration
+
+
+### Recommendations
+
+* Schedule the workers on a distributed or random time slot to avoid them all hitting HDFS and ZK at once
+
+
 ## Operational Modes' workflows
 ### Client
 Check that a valid file has been submitted for Shredding  
@@ -50,9 +58,10 @@ Unavailable Data Nodes; it is possibly and even likely that a Data Node may be o
 
 Distributed vs Centralised process; In some architectures it may be preferable to run this process from a central MapReduce job rather than a set of distributed workers. This of course comes with its own challenges, most particularly executing remote shell commands on every DataNode. This implmentation is a distributed one because it suits the environment it is being designed for.
 
+This implementation uses the JVM-reliant HDFS library for Python. It would be more effecient to use the HDFS3 library (http://hdfs3.readthedocs.io/en/latest/) however it has dependencies not readily available on older estates that this service is targetted at.
 
 ## Versioning Notes
-0.0.1 Initial draft of logic using linux cp to maintain file control after hdfs delete
-0.0.2 Revised logic to run as async distributed service on all datanodes
-0.0.3 Revised to remove race condition of 0.0.2 by running distributed transaction via ZooKeeper
-0.0.4 Moved status and notes tracking out of ZooKeeper into HDFS to avoid melting ZK during large operations
+0.0.1 Initial draft of logic using linux cp to maintain file control after hdfs delete  
+0.0.2 Revised logic to run as async distributed service on all datanodes  
+0.0.3 Revised to remove race condition of 0.0.2 by running distributed transaction via ZooKeeper  
+0.0.4 Moved status and notes tracking out of ZooKeeper into HDFS to avoid melting ZK during large operations  

@@ -11,12 +11,15 @@ import pytest
 import shred
 import logging
 import collections
+import socket
 
 
 test_file_size = "10"
 test_file_path = "/tmp/"
 test_file_dir = "shred_test_file"
 test_files = []
+test_job_id = None
+test_job_status = None
 
 # Test control Params
 remove_test_files = False
@@ -27,8 +30,38 @@ shred.log.setLevel(shred.logging.DEBUG)
 shred.conf.ZOOKEEPER['PATH'] = '/shredtest/'
 
 
+def generate_test_data():
+    # Generate test data
+    shred.log.info("Out of test data, generating new Test Data files...")
+    clean_dir_cmd = ["hdfs", "dfs", "-rmdir", ospathjoin(test_file_path, test_file_dir)]
+    shred.run_shell_command(clean_dir_cmd)
+    gen_test_data_cmd = ["/usr/hdp/current/hadoop-client/bin/hadoop", "jar",
+                         glob("/usr/hdp/current/hadoop-mapreduce-client/hadoop-mapreduce-examples-*.jar")[0],
+                         "teragen", test_file_size, ospathjoin(test_file_path, test_file_dir)]
+    gen_test_data_iter = shred.run_shell_command(gen_test_data_cmd)
+    for line in gen_test_data_iter:
+        if "Bytes Written" in line:
+            shred.log.info(line)
+    # remove 0 size '_SUCCESS' file
+    del_file_cmd = ["hdfs", "dfs", "-rm", ospathjoin(test_file_path, test_file_dir, "_SUCCESS")]
+    do_nothing = shred.run_shell_command(del_file_cmd)
+
+
+def update_test_files():
+    shred.log.info("Updating list of test data files")
+    global test_files
+    filelist_cmd = ["hdfs", "dfs", "-ls", ospathjoin(test_file_path, test_file_dir)]
+    filelist_iter = shred.run_shell_command(filelist_cmd)
+    for line in filelist_iter:
+        splits = ssplit(line)
+        if "{0}".format(ospathjoin(test_file_path, test_file_dir)) in splits[-1]:
+            test_files.append(splits[-1])
+    shred.log.info("Test files are now [{0}]".format(test_files))
+
+
 def setup_module():
     shred.log.info("Begin Setup")
+    shred.log.info("Checking for existing test data")
     # Check if test data already exists
     test_data_exists_cmd = ["hdfs", "dfs", "-ls", ospathjoin(test_file_path, test_file_dir)]
     test_data_exists_iter = shred.run_shell_command(test_data_exists_cmd)
@@ -40,29 +73,9 @@ def setup_module():
             test_data_exists_state = True
     except StopIteration:
         test_data_exists_state = False
-
     if test_data_exists_state is False:
-        # Generate test data
-        shred.log.info("Generating Test Data...")
-        clean_dir_cmd = ["hdfs", "dfs", "-rmdir", ospathjoin(test_file_path, test_file_dir)]
-        shred.run_shell_command(clean_dir_cmd)
-        gen_test_data_cmd = ["/usr/hdp/current/hadoop-client/bin/hadoop", "jar",
-                             glob("/usr/hdp/current/hadoop-mapreduce-client/hadoop-mapreduce-examples-*.jar")[0],
-                   "teragen", test_file_size, ospathjoin(test_file_path, test_file_dir)]
-        gen_test_data_iter = shred.run_shell_command(gen_test_data_cmd)
-        for line in gen_test_data_iter:
-            if "Bytes Written" in line:
-                shred.log.info(line)
-    # get test files
-    shred.log.info("Getting list of Test Files")
-    global test_files
-    filelist_cmd = ["hdfs", "dfs", "-ls", ospathjoin(test_file_path, test_file_dir)]
-    filelist_iter = shred.run_shell_command(filelist_cmd)
-    for line in filelist_iter:
-        splits = ssplit(line)
-        if "{0}".format(ospathjoin(test_file_path, test_file_dir)) in splits[-1]:
-            test_files.append(splits[-1])
-    print test_files
+        generate_test_data()
+    update_test_files()
 
 
 def teardown_module():
@@ -147,16 +160,47 @@ def test_check_hdfs_for_target():
     assert out is False
 
 
-def test_prepare_and_ingest_job():
+def test_init_new_job():
     shred.log.info("Testing Job Preparation Logic")
     hdfs = shred.connect_hdfs()
-    job_id, job_status = shred.prepare_job(test_files[-1])
+    job_id, job_status = shred.init_new_job()
     assert job_id is not None
     assert job_status == "stage1init"
 
     shred.log.info("Testing Target File Ingest")
-    job_id, job_status = shred.ingest_targets(job_id, test_files[-1])
+    my_test_file = test_files.pop()
+    job_id, job_status = shred.ingest_targets(job_id, my_test_file)
+    # this removes the test file from availability, so we have to pop it off the queue
     assert job_id is not None
     assert job_status == "stage1ingestComplete"
+
+    shred.finalise_client(job_id, my_test_file)
+
+
+def test_get_worker_identity():
+    worker_id = shred.get_worker_identity()
+    # testing is a valid IP returned
+    socket.inet_aton(worker_id)
+
+
+def test_prepare_blocklists():
+    # TODO: Rewrite Main workflow in shred.py into a wrapper function for each core component for easier testing
+    try:
+        my_test_file = test_files.pop()
+    except IndexError:
+        generate_test_data()
+        update_test_files()
+        my_test_file = test_files.pop()
+    if not test_job_id:
+        global test_job_id
+        hdfs = shred.connect_hdfs()
+        test_job_id, test_job_status = shred.init_new_job()
+        test_job_id, test_job_status = shred.ingest_targets(test_job_id, my_test_file)
+        shred.finalise_client(test_job_id, my_test_file)
+    test_worklist = shred.check_for_new_worker_jobs()
+    assert test_worklist > 0
+    zk = shred.connect_zk()
+    test_result = shred.prepare_blocklists(test_job_id)
+    assert test_result == "success"
     
-    shred.finalise_client(job_id, test_files[-1])
+# TODO: Test for 0 size files that make fsck behave differently

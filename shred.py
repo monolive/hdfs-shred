@@ -14,11 +14,13 @@ import subprocess
 import sys
 import argparse
 from uuid import uuid4
-from socket import gethostname
+from socket import gethostname, gethostbyname
 from os.path import join as ospathjoin
 from os.path import dirname, abspath
 from kazoo.client import KazooClient
+from datetime import timedelta as dttd
 from hdfs import Config
+from json import dumps, loads
 
 from config import conf
 
@@ -124,42 +126,14 @@ def check_hdfs_for_target(target):
         return False
 
 
-def get_fsck_output(target):
-    """Runs HDFS FSCK on the HDFS File to get block location information for Linux shredder"""
-    # fsck_out_iter = run_shell_command(['cat', 'sample-data.txt'])
-    fsck_out_iter = run_shell_command(["hdfs", "fsck", target, "-files", "-blocks", "-locations"])
-    log.debug("Fsck_out type is [{0}]".format(type(fsck_out_iter)))
-    return fsck_out_iter
-
-
-def parse_blocks_from_fsck(raw_fsck):
-    """Separate parser for FSCK output to make maintenance easier"""
-    output = {}
-    while True:
-        try:
-            current_line = raw_fsck.next()
-            if current_line[0].isdigit():
-                # TODO: Covert Block names to INTs and pack into job lots in ZK to reduce space
-                output_split = current_line.split("[", 1)
-                block_id = re.search(':(.+?) ', output_split[0]).group(1).rpartition("_")
-                block_by_data_nodes = re.findall("DatanodeInfoWithStorage\[(.*?)\]", output_split[1])
-                for block in block_by_data_nodes:
-                    dn_ip = block.split(":", 1)
-                    if dn_ip[0] not in output:
-                        output[dn_ip[0]] = []
-                    output[dn_ip[0]].append(block_id[0])
-        except StopIteration:
-            break
-    log.debug("FSCK parser output [{0}]".format(output))
-    return output
-
-
 def set_status(job_id, component, status):
     """Abstracts setting a given status for a given job, job subcomponent, and status message"""
     # determine file to be written
     if component == "master":
         # The master component always updates the state of the job in the master job list
         file_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", job_id)
+    elif component == "data":
+        file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, "status")
     else:
         # otherwise we update the file named for that component in the subdir for the job in the general store
         file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, component, "status")
@@ -170,7 +144,7 @@ def set_status(job_id, component, status):
         raise ValueError("File Path to set job status not set.")
 
 
-def prepare_job():
+def init_new_job():
     """and generates job management files and dirs"""
     # Generate a guid for a job ID
     job_id = str(uuid4())
@@ -198,6 +172,8 @@ def ingest_targets(job_id, target):
     path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, 'data')
     # Using the HDFS module's rename function to move the target files
     log.debug("Moving target file [{0}] to shredder holding pen [{1}]".format(target, path))
+    # We need to ensure the directory is created, or the rename command will dump the data into the file
+    hdfs.makedirs(path)
     hdfs.rename(target, path)
     # update status
     status = "stage1ingestComplete"
@@ -216,7 +192,10 @@ def finalise_client(job_id, target):
 
 def get_worker_identity():
     """Determines a unique identity string to use for this worker"""
-    worker_id = gethostname()
+    # TODO: Implement something more robust than a simple IP lookup!!!
+    # Doing a brutal match by hostname or IP is not robust enough!
+    # worker_id = gethostname()
+    worker_id = gethostbyname(gethostname())
     return worker_id
 
 
@@ -239,6 +218,109 @@ def check_for_new_worker_jobs():
     return worker_job_list
 
 
+def get_target_by_jobid(job_id):
+    """Gets paths of target files ingested into this jobs data store directory
+    returns list of absolute paths to target files on HDFS"""
+    hdfs_file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, "data")
+    log.debug("getting list of files at path [{0}]".format(hdfs_file_path))
+    # hdfs.list returns a list of file names in a directory
+    hdfs_file_list = hdfs.list(hdfs_file_path)
+    out = []
+    for file in hdfs_file_list:
+        # TODO: Check if HDFS always uses / as path separator on Win or Linux etc.
+        out.append(hdfs_file_path + '/' + file)
+    return out
+
+
+def get_fsck_output(target):
+    """Runs HDFS FSCK on the HDFS File to get block location information for Linux shredder"""
+    # fsck_out_iter = run_shell_command(['cat', 'sample-data.txt'])
+    fsck_out_iter = run_shell_command(["hdfs", "fsck", target, "-files", "-blocks", "-locations"])
+    log.debug("Fsck_out type is [{0}]".format(type(fsck_out_iter)))
+    return fsck_out_iter
+
+
+def parse_blocks_from_fsck(raw_fsck):
+    """
+    Separate parser for FSCK output to make maintenance easier
+    Takes an iterator of the hdfs fsck output
+    Returns a dict keyed by IP of each datanode with a list of blk ids
+    example: {'172.16.0.80': ['blk_1073839025'], '172.16.0.40': ['blk_1073839025'], '172.16.0.50': ['blk_1073839025']}
+    """
+    output = {}
+    while True:
+        try:
+            current_line = raw_fsck.next()
+            if current_line[0].isdigit():
+                output_split = current_line.split("[", 1)
+                block_id = re.search(':(.+?) ', output_split[0]).group(1).rpartition("_")
+                block_by_data_nodes = re.findall("DatanodeInfoWithStorage\[(.*?)\]", output_split[1])
+                for block in block_by_data_nodes:
+                    dn_ip = block.split(":", 1)
+                    if dn_ip[0] not in output:
+                        output[dn_ip[0]] = []
+                    output[dn_ip[0]].append(block_id[0])
+        except StopIteration:
+            break
+    log.debug("FSCK parser output [{0}]".format(output))
+    return output
+
+
+def prepare_blocklists(job_id):
+    """Attempts to take leadership for job preparation and creates the block-file lists for each datanode worker"""
+    # attempt to kazoo lease new guid node for sleep period minutes
+    log.debug("Preparing Blocklists for job [{0}]".format(job_id))
+    log.debug("Attempting to get lease as leader for job")
+    lease = zk.NonBlockingLease(
+        path=conf.ZOOKEEPER['PATH'] + job_id,
+        duration=dttd(minutes=conf.WORKER_SLEEP),
+        identifier="Worker [{0}] preparing blocklists for job [{1}]".format(get_worker_identity(), job_id)
+    )
+    # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
+    # if not get lease, return pipped status
+    if not lease:
+        log.debug("Beaten to leasehold by another worker")
+        return "pipped"
+    else:
+        log.debug("Got lease as leader on job, updating job status")
+        # update job status to stage2prepareblocklist
+        status = "stage2prepareBlocklist"
+        component = "master"
+        set_status(job_id, component, status)
+        # get job target ( returns a list )
+        targets = get_target_by_jobid(job_id)
+        log.debug("Got target file(s) [{0}] for job".format(targets))
+        # get fsck data for targets
+        blocklists = {}
+        for target in targets:
+            fsck_data = get_fsck_output(target)
+            # parse fsck data for blocklists
+            blocklists.update(parse_blocks_from_fsck(fsck_data))
+        log.debug("Parsed FSCK output for target files: [{0}]".format(blocklists))
+        # match fsck output to worker_ids
+            # block IDs for workers are currently the IP of the datanode, which matches our worker_id in the utility
+            # Therefore no current need to do a match between the fsck output and the local worker ID
+        # write a per-DN file to hdfs job subdir for other workers to read
+        target_workers = blocklists.keys()
+        log.debug("Datanode list for these blockfiles is: [{0}]".format(target_workers))
+        for this_worker in target_workers:
+            this_worklist = {}
+            for blockfile in blocklists[this_worker]:
+                this_worklist[blockfile] = "new"
+            workfile_content = dumps(this_worklist)
+            file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, this_worker)
+            log.debug("Writing [{0}] to workfile [{1}] for Datanode [{2}]"
+                      .format(workfile_content, file_path, this_worker))
+            hdfs.write(file_path, workfile_content, overwrite=True)
+        # update job status to stage2copyblocks
+        log.debug("Completed leader tasks for blocklist preparation, updating status and returning from function")
+        status = "stage2copyblocks"
+        set_status(job_id, component, status)
+        # TODO: Look for a method to explicitly release the lease when done
+        # apparently there's no release lease command in this recipe, so it'll just timeout?
+        # return success status
+        return "success"
+
 # End Function definitions
 
 
@@ -249,6 +331,7 @@ def main():
     log.debug("Parsing args using Argparse module.")
     args = parse_args(sys.argv[1:])                                             # Test Written
     # Checking the config was pulled in
+    # TODO: Move to full configuration file validation function
     log.debug("Checking for config parameters.")
     if not conf.VERSION:
         raise StandardError(
@@ -272,7 +355,7 @@ def main():
         else:
             # By using the client to move the file to the shred location we validate that the user has permissions
             # to call for the delete and shred
-            job_id, job_status = prepare_job()
+            job_id, job_status = init_new_job()
             if 'stage1init' not in job_status:
                 raise "Could not create job for file: [{0}]".format(target)
             else:
@@ -305,13 +388,19 @@ def main():
             log.info("New jobs found: [{0}]".format(worklist))
             # connect to ZK
             zk = connect_zk()
-            # if no guid node, attempt to kazoo lease new guid node for 2x sleep period minutes
-            # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
-            # if not get lease, pass, else:
-            # update job status to stage2prepareblocklist
-            # parse fsck for blocklist, write to hdfs job subdir for other workers to read
-            # update job status to stage2copyblocks
-            # release lease
+            # for each job in list
+            for job_id in worklist:
+                # if no guid node indicating the lease is available
+                if zk.exists(conf.ZOOKEEPER['PATH'] + job_id):
+                    result = prepare_blocklists(job_id)
+                    if result == "success":
+                        log.info("Worker [{0}] successfully prepared blocklists for job [{0}]"
+                                 .format(worker_id, job_id))
+                    elif result == "pipped":
+                        log.info("Attempted to run blocklist preparation for job [{0}] but was beaten to it by"
+                                 "another worker, are the workers on a concurrent schedule?".format(job_id))
+                    else:
+                        raise StandardError("Unexpected return status from blocklist preparation task")
         else:
             log.info("No new jobs found")
             pass

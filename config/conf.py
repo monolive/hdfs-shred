@@ -14,5 +14,5 @@ HDFS_SHRED_PATH = "/tmp/shred"
 
 LINUXFS_SHRED_PATH = ".shred"
 
-# Duration in seconds
-WORKER_SLEEP = 30
+# Duration in minutes
+WORKER_SLEEP = 1
