@@ -19,7 +19,7 @@ from os.path import join as ospathjoin
 from os.path import dirname, abspath
 from kazoo.client import KazooClient
 from datetime import timedelta as dttd
-from hdfs import Config
+from hdfs import Config, HdfsError
 from json import dumps, loads
 
 from config import conf
@@ -88,10 +88,17 @@ def connect_zk():
 def connect_hdfs():
     """Uses HDFS client module to connect to HDFS
     returns handle object"""
-    log.debug("Atempting to instantiate HDFS client")
+    log.debug("Attempting to instantiate HDFS client")
     # TODO: Write try/catch for connection errors and states
     global hdfs
-    hdfs = Config(dirname(__file__) + "/config/hdfscli.cfg").get_client()
+    try:
+        hdfs = Config("./config/hdfscli.cfg").get_client()
+    except HdfsError:
+        try:
+            hdfs = Config(dirname(__file__) + "/config/hdfscli.cfg").get_client()
+        except HdfsError:
+            log.error("Couldn't find HDFS config file")
+            exit(1)
     if hdfs:
         return hdfs
     else:
@@ -199,7 +206,7 @@ def get_worker_identity():
     return worker_id
 
 
-def check_for_new_worker_jobs():
+def get_jobs_by_status(target_status):
     """Checks for the existance of new worker jobs and returns a list of them if they exist"""
     worker_job_list = []
     # check if dir exists as worker my load before client is ever used
@@ -213,7 +220,7 @@ def check_for_new_worker_jobs():
                 with hdfs.read(ospathjoin(job_path, item[0])) as reader:
                     job_status = reader.read()
                 # if file contains the completion status for stage1, put it in worker list
-                if job_status == "stage1complete":
+                if job_status == target_status:
                     worker_job_list.append(item[0])
     return worker_job_list
 
@@ -282,6 +289,7 @@ def prepare_blocklists(job_id):
         log.debug("Beaten to leasehold by another worker")
         return "pipped"
     else:
+        # TODO: Add Lease management, there's probably a with... function here somewhere for it
         log.debug("Got lease as leader on job, updating job status")
         # update job status to stage2prepareblocklist
         status = "stage2prepareBlocklist"
@@ -382,7 +390,7 @@ def main():
         # Establishing HDFS connection
         connect_hdfs()
         # check if there are jobs to be done
-        worklist = check_for_new_worker_jobs()
+        worklist = get_jobs_by_status('stage1complete')
         # if no new do next section
         if len(worklist) > 0:
             log.info("New jobs found: [{0}]".format(worklist))
@@ -404,9 +412,8 @@ def main():
         else:
             log.info("No new jobs found")
             pass
-        # check DN subdirs for active jobs
-        # Foreach job in subdirs
-        # if status is stage2copyblocks
+        # Begin non-leader functionality for Worker
+        worklist = get_jobs_by_status('stage2copyblocks')
         # parse blocklist for job
         # if blocks for this DN
         # update DN status to Stage2running

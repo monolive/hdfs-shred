@@ -197,7 +197,7 @@ def test_prepare_blocklists():
         test_job_id, test_job_status = shred.init_new_job()
         test_job_id, test_job_status = shred.ingest_targets(test_job_id, my_test_file)
         shred.finalise_client(test_job_id, my_test_file)
-    test_worklist = shred.check_for_new_worker_jobs()
+    test_worklist = shred.get_jobs_by_status('stage1complete')
     assert test_worklist > 0
     zk = shred.connect_zk()
     test_result = shred.prepare_blocklists(test_job_id)

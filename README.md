@@ -4,6 +4,9 @@ Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS f
   Conceived as distributed collection of asynchronous workers coordinated via ZooKeeper and HDFS.  
 With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.  
 
+## Status
+Functionality incomplete; tests passing.
+
 ## Summary
 Uses a three-phase approach to the secure shredding of files in HDFS, which match three operational modes for the program:
 
@@ -42,13 +45,14 @@ Finally updates HDFS:/.shred/#/DNName/status with shredded status
 ## Features
 * Managed via central config file.  
 * Logs all activity to Syslog.  
-* [TODO]Uses HDFS dir to track global job state of deletion and shredding actions.
-* [TODO]Uses local Linux dir to track local block shredding actions  
+* Uses HDFS dir to track global job state of deletion and shredding actions.
 * [TODO]Uses Linux cp pointer to maintain disk block ownership after HDFS delete
 * Uses hadoop fsck to get file blocks. 
-* [TODO]Uses HDFS Client to delete files.    
+* Uses HDFScli module to interact with HDFS where possible.
+* Uses Kazoo module to interact with ZooKeeper for distributed task cordination
 * [TODO]Uses Linux shred command to destroy disk blocks.
 * [TODO]Integrates easily with Cron for scheduling
+* [In Progress] Extensive testing
 
 
 ## Considered limitations
