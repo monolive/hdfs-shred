@@ -1,8 +1,8 @@
 # hdfs-shred
-Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS for audit compliance.
-  Implented in Python2.x for native compaitbility with most Linux distributions.
-  Conceived as distributed collection of asynchronous workers coordinated via ZooKeeper and HDFS.
-With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.
+Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS for audit compliance.  
+  Implented in Python2.x for native compaitbility with most Linux distributions.  
+  Conceived as distributed collection of asynchronous workers coordinated via ZooKeeper and HDFS.  
+With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.  
 
 ## Summary
 Uses a three-phase approach to the secure shredding of files in HDFS, which match three operational modes for the program:
@@ -58,7 +58,7 @@ Unavailable Data Nodes; it is possibly and even likely that a Data Node may be o
 
 Distributed vs Centralised process; In some architectures it may be preferable to run this process from a central MapReduce job rather than a set of distributed workers. This of course comes with its own challenges, most particularly executing remote shell commands on every DataNode. This implmentation is a distributed one because it suits the environment it is being designed for.
 
-This implementation uses the JVM-reliant HDFS library for Python. It would be more effecient to use the HDFS3 library (http://hdfs3.readthedocs.io/en/latest/) however it has dependencies not readily available on older estates that this service is targetted at.
+This implementation uses the JVM-reliant HDFScli library for Python (http://hdfscli.readthedocs.io/en/latest/). It would be more effecient to use the HDFS3 library (http://hdfs3.readthedocs.io/en/latest/) as it natively retrieves block info, however it has dependencies not readily available on older estates that this service is targeted at.
 
 ## Versioning Notes
 0.0.1 Initial draft of logic using linux cp to maintain file control after hdfs delete  
