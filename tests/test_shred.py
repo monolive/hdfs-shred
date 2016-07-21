@@ -202,5 +202,5 @@ def test_prepare_blocklists():
     zk = shred.connect_zk()
     test_result = shred.prepare_blocklists(test_job_id)
     assert test_result == "success"
-    
+
 # TODO: Test for 0 size files that make fsck behave differently

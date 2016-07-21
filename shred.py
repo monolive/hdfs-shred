@@ -413,20 +413,45 @@ def main():
             log.info("No new jobs found")
             pass
         # Begin non-leader functionality for Worker
-        worklist = get_jobs_by_status('stage2copyblocks')
-        # parse blocklist for job
-        # if blocks for this DN
-        # update DN status to Stage2running
-        # create tasklist file under DN subdir in job
-        # foreach blockfile in job:
-        # update tasklist file to finding
-        # find blockfile on ext4
-        # update tasklist file to copying
-        # create hardlink to .shred dir on same partition
-        # update tasklist file to copied
-        # When all blocks finished, update DN status to Stage2complete
+        joblist = get_jobs_by_status('stage2copyblocks')
+        # If there are jobs
+        if len(joblist) > 0:
+            tasklist = {}
+            # Parse jobs for files referencing this worker, and collect tasks
+            for job_id in joblist:
+                file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, worker_id)
+                blocklist = None
+                # cheaper IO to explicitly try to open the expected file than to list the dir here
+                try:
+                    with hdfs.read(file_path) as reader:
+                        # Blocklist file for this DN in this job
+                        full_blocklist = loads(reader.read())
+                        # We only want to pick up new blocks
+                        # TODO: logic to handle recovery of failed jobs
+                        for key in full_blocklist:
+                            if full_blocklist[key] == "new":
+                                blocklist[key] = "new"
+                except HdfsError:
+                    # No blocklist file for this DN in this job
+                    pass  # we've already set the blocklist to None above
+                if blocklist is not None:
+                    tasklist[job_id] = blocklist
+                    # This should result in a dict keyed by job_id, containing a subdict keyed by block id
+            if len(tasklist) > 0:
+                pass
+                # begin tasklist processing
+                # foreach blockfile in job:
+                for this_job_id in tasklist:
+                    for this_block_id in tasklist[this_job_id]:
+                        pass
+                        # TODO: Pickup here tomorrow
+                # update tasklist file to finding
+                # find blockfile on ext4
+                # update tasklist file to copying
+                # create hardlink to .shred dir on same partition
+                # update tasklist file to copied
         #
-        # if all blocks copied, attempt lease of guid for 2x sleep period minutes, else sleep for 1x period minutes
+        # if all blocks copied, attempt lease of guid for 1x sleep period minutes, else sleep for 1x period minutes
         # if lease:
         # Update DN status to Stage2leaderactive
         # periodically check status file of each DN against DNs in blocklist
