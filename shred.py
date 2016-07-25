@@ -16,7 +16,8 @@ import argparse
 from uuid import uuid4
 from socket import gethostname, gethostbyname
 from os.path import join as ospathjoin
-from os.path import dirname, abspath
+from os.path import dirname, realpath, ismount, exists
+from os import link, makedirs
 from kazoo.client import KazooClient
 from datetime import timedelta as dttd
 from hdfs import Config, HdfsError
@@ -211,7 +212,11 @@ def get_jobs_by_status(target_status):
     worker_job_list = []
     # check if dir exists as worker my load before client is ever used
     job_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs")
-    job_dir_exists = hdfs.content(job_path, strict=False)
+    job_dir_exists = None
+    try:
+        job_dir_exists = hdfs.content(job_path, strict=False)
+    except AttributeError:
+        log.error("HDFS Client not connected")
     if job_dir_exists is not None:
         # if job dir exists, get listing and any files
         dirlist = hdfs.list(job_path, status=True)
@@ -329,6 +334,15 @@ def prepare_blocklists(job_id):
         # return success status
         return "success"
 
+
+# http://stackoverflow.com/a/4453715
+def find_mount_point(path):
+    # 
+    path = realpath(path)
+    while not ismount(path):
+        path = dirname(path)
+    return path
+    
 # End Function definitions
 
 
@@ -355,7 +369,7 @@ def main():
     if args.mode is 'client':
         log.debug("Detected that we're running in 'client' Mode")
         # forcing target to be absolute pathed for safety
-        target = abspath(args.file_to_shred)
+        target = realpath(args.file_to_shred)
         log.debug("Checking if file exists in HDFS")
         target_exists = check_hdfs_for_target(target)
         if target_exists is not True:
@@ -416,40 +430,69 @@ def main():
         joblist = get_jobs_by_status('stage2copyblocks')
         # If there are jobs
         if len(joblist) > 0:
+            log.info("Worker [{0}] woke and found active jobs in status [stage2copyblocks]".format(worker_id))
             tasklist = {}
             # Parse jobs for files referencing this worker, and collect tasks
             for job_id in joblist:
                 file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, worker_id)
-                blocklist = None
+                this_job_blocklist = {}
                 # cheaper IO to explicitly try to open the expected file than to list the dir here
                 try:
                     with hdfs.read(file_path) as reader:
                         # Blocklist file for this DN in this job
-                        full_blocklist = loads(reader.read())
+                        this_job_blocklist = loads(reader.read())
                         # We only want to pick up new blocks
                         # TODO: logic to handle recovery of failed jobs
-                        for key in full_blocklist:
-                            if full_blocklist[key] == "new":
-                                blocklist[key] = "new"
                 except HdfsError:
                     # No blocklist file for this DN in this job
                     pass  # we've already set the blocklist to None above
-                if blocklist is not None:
-                    tasklist[job_id] = blocklist
+                if this_job_blocklist is not None:
+                    tasklist[job_id] = this_job_blocklist
                     # This should result in a dict keyed by job_id, containing a subdict keyed by block id
             if len(tasklist) > 0:
-                pass
-                # begin tasklist processing
                 # foreach blockfile in job:
                 for this_job_id in tasklist:
-                    for this_block_id in tasklist[this_job_id]:
-                        pass
-                        # TODO: Pickup here tomorrow
-                # update tasklist file to finding
-                # find blockfile on ext4
-                # update tasklist file to copying
-                # create hardlink to .shred dir on same partition
-                # update tasklist file to copied
+                    for this_block_file in tasklist[this_job_id]:
+                        if tasklist[this_job_id][this_block_file] == "new":
+                            log.debug("Doing OS Find for blockfile [{0}] on worker [{1}] for job [{2}]"
+                                      .format(this_block_file, worker_id, this_job_id))
+                            tasklist[this_job_id][this_block_file] = "finding"
+                            # TODO: Set search root to HDFS FS root from configs
+                            find_root = "/"
+                            find_cmd = ["find", find_root, "-name", this_block_file]
+                            block_find_iter = run_shell_command(find_cmd)
+                            # TODO: Handle file not found and other errors
+                            found_files = []
+                            for file in block_find_iter:
+                                found_files.append(file.rstrip('\n'))
+                            # TODO: Handle multiple files found
+                            if len(found_files) == 1:
+                                this_file = found_files[0]
+                                log.debug("Found blockfile [{0}] at loc [{1}]".format(this_block_file, this_file))
+                                tasklist[this_job_id][this_block_file] = "linking"
+                                # Find the mount point for this file
+                                this_file_part = find_mount_point(this_file)
+                                # ensure we have a .shred dir available to link into
+                                this_part_shred_dir = ospathjoin(this_file_part, conf.LINUXFS_SHRED_PATH)
+                                if not exists(this_part_shred_dir):
+                                    makedirs(this_part_shred_dir)
+                                # Link the blkfile to it
+                                link(this_file, ospathjoin(this_part_shred_dir, this_block_file))
+                                log.debug("Linked blockfile [{0}] at loc [{1}] to shred loc at [{2}]"
+                                          .format(this_block_file, this_file, this_part_shred_dir))
+                                tasklist[this_job_id][this_block_file] = "linked"
+                            else:
+                                log.error("Found unexpected number of instances of blockfile on the local OS filesystem.")
+                        elif tasklist[this_job_id][this_block_file] == "linked":
+                            log.info("blockfile [{0}] already linked")
+                    # update blockfile status' in job file
+                    file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", this_job_id, worker_id)
+                    # combined read/write doesn't work on this version of python, going for brute overwrite
+                    hdfs.write(file_path, dumps(tasklist[this_job_id]), overwrite=True)
+            else:
+                log.info("Worker [{0}] found no blockfiles listed for this Datanode in active jobs")
+        else:
+            log.info("Worker [{0}] found no jobs in status [stage2copyblocks]".format(worker_id))
         #
         # if all blocks copied, attempt lease of guid for 1x sleep period minutes, else sleep for 1x period minutes
         # if lease:
