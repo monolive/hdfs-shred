@@ -25,23 +25,27 @@ from json import dumps, loads
 
 from config import conf
 
-# Set to True to enhance logging when working in a development environment
-test_mode = True
+# TODO: Build into an Ambari agent to handle distribution and monitoring perhaps?
+
+
+# ###################          Logging            ##########################
 
 log = logging.getLogger('apriloneil')
-log.setLevel(logging.INFO)
+log_level = logging.getLevelName(conf.LOG_LEVEL)
+log.setLevel(log_level)
 handler = logging.handlers.SysLogHandler(address='/dev/log')
 handler.setFormatter(RFC5424Formatter())
 log.addHandler(handler)
-if test_mode:
+if conf.TEST_MODE:
     con_handler = logging.StreamHandler()
     log.addHandler(con_handler)
 
-# Global Handles
+# ###################          Globals            ##########################
+# TODO: Replace global handles with passed handles for ease of debugging
 zk = None
 hdfs = None
 
-# Begin Function definitions
+# ###################          Begin Function definitions           ##########################
 
 
 def parse_args(args):
@@ -342,16 +346,16 @@ def find_mount_point(path):
     while not ismount(path):
         path = dirname(path)
     return path
-    
-# End Function definitions
 
+# ###################          End Function definitions           ##########################
 
-def main():
-    # Program setup
+# ###################          Begin Workflow definitions           ##########################
+
+def init_program(passed_args):
     log.info("shred.py called with args [{0}]").format(sys.argv[1:])
     # Get invoke parameters
     log.debug("Parsing args using Argparse module.")
-    args = parse_args(sys.argv[1:])                                             # Test Written
+    args = parse_args(sys.argv[1:])  # Test Written
     # Checking the config was pulled in
     # TODO: Move to full configuration file validation function
     log.debug("Checking for config parameters.")
@@ -364,135 +368,139 @@ def main():
     # Check directories etc. are setup
     hdfs.makedirs(conf.HDFS_SHRED_PATH)
     # TODO: Further Application setup tests
+    return args
     # End Program Setup
 
-    if args.mode is 'client':
-        log.debug("Detected that we're running in 'client' Mode")
-        # forcing target to be absolute pathed for safety
-        target = realpath(args.file_to_shred)
-        log.debug("Checking if file exists in HDFS")
-        target_exists = check_hdfs_for_target(target)
-        if target_exists is not True:
-            raise "Submitted File not found on HDFS: [{0}]".format(target)
+
+def client_workflow(passed_args):
+    log.debug("Detected that we're running in 'client' Mode")
+    # forcing target to be absolute pathed for safety
+    target = realpath(passed_args.file_to_shred)
+    log.debug("Checking if file exists in HDFS")
+    target_exists = check_hdfs_for_target(target)
+    if target_exists is not True:
+        raise "Submitted File not found on HDFS: [{0}]".format(target)
+    else:
+        # By using the client to move the file to the shred location we validate that the user has permissions
+        # to call for the delete and shred
+        job_id, job_status = init_new_job()
+        if 'stage1init' not in job_status:
+            raise "Could not create job for file: [{0}]".format(target)
         else:
-            # By using the client to move the file to the shred location we validate that the user has permissions
-            # to call for the delete and shred
-            job_id, job_status = init_new_job()
-            if 'stage1init' not in job_status:
-                raise "Could not create job for file: [{0}]".format(target)
-            else:
-                log.info("Created job id [{0}] for target [{1}]. Current status: [{2}]".format(
-                    job_id, target, job_status
-                ))
-                job_id, status = ingest_targets(job_id, target)
-                if status != "stage1ingestComplete":
-                    raise StandardError(
-                        "Ingestion failed for file [{0}] for job [{1}], please see log and status files for details"
+            log.info("Created job id [{0}] for target [{1}]. Current status: [{2}]".format(
+                job_id, target, job_status
+            ))
+            job_id, status = ingest_targets(job_id, target)
+            if status != "stage1ingestComplete":
+                raise StandardError(
+                    "Ingestion failed for file [{0}] for job [{1}], please see log and status files for details"
                         .format(target, job_id)
-                    )
-                else:
-                    ready_for_exit = finalise_client(job_id, target)
-                    if ready_for_exit:
-                        exit(0)
-                    else:
-                        raise StandardError("Unexpected program exit status, please refer to logs")
-    elif args.mode is 'worker':
-        # Determine identity
-        worker_id = get_worker_identity()
-        # wake from sleep mode
-        log.info("Worker [{0}] activating".format(worker_id))
-        # Establishing HDFS connection
-        connect_hdfs()
-        # check if there are jobs to be done
-        worklist = get_jobs_by_status('stage1complete')
-        # if no new do next section
-        if len(worklist) > 0:
-            log.info("New jobs found: [{0}]".format(worklist))
-            # connect to ZK
-            zk = connect_zk()
-            # for each job in list
-            for job_id in worklist:
-                # if no guid node indicating the lease is available
-                if zk.exists(conf.ZOOKEEPER['PATH'] + job_id):
-                    result = prepare_blocklists(job_id)
-                    if result == "success":
-                        log.info("Worker [{0}] successfully prepared blocklists for job [{0}]"
-                                 .format(worker_id, job_id))
-                    elif result == "pipped":
-                        log.info("Attempted to run blocklist preparation for job [{0}] but was beaten to it by"
-                                 "another worker, are the workers on a concurrent schedule?".format(job_id))
-                    else:
-                        raise StandardError("Unexpected return status from blocklist preparation task")
-        else:
-            log.info("No new jobs found")
-            pass
-        # Begin non-leader functionality for Worker
-        joblist = get_jobs_by_status('stage2copyblocks')
-        # If there are jobs
-        if len(joblist) > 0:
-            log.info("Worker [{0}] woke and found active jobs in status [stage2copyblocks]".format(worker_id))
-            tasklist = {}
-            # Parse jobs for files referencing this worker, and collect tasks
-            for job_id in joblist:
-                file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, worker_id)
-                this_job_blocklist = {}
-                # cheaper IO to explicitly try to open the expected file than to list the dir here
-                try:
-                    with hdfs.read(file_path) as reader:
-                        # Blocklist file for this DN in this job
-                        this_job_blocklist = loads(reader.read())
-                        # We only want to pick up new blocks
-                        # TODO: logic to handle recovery of failed jobs
-                except HdfsError:
-                    # No blocklist file for this DN in this job
-                    pass  # we've already set the blocklist to None above
-                if this_job_blocklist is not None:
-                    tasklist[job_id] = this_job_blocklist
-                    # This should result in a dict keyed by job_id, containing a subdict keyed by block id
-            if len(tasklist) > 0:
-                # foreach blockfile in job:
-                for this_job_id in tasklist:
-                    for this_block_file in tasklist[this_job_id]:
-                        if tasklist[this_job_id][this_block_file] == "new":
-                            log.debug("Doing OS Find for blockfile [{0}] on worker [{1}] for job [{2}]"
-                                      .format(this_block_file, worker_id, this_job_id))
-                            tasklist[this_job_id][this_block_file] = "finding"
-                            # TODO: Set search root to HDFS FS root from configs
-                            find_root = "/"
-                            find_cmd = ["find", find_root, "-name", this_block_file]
-                            block_find_iter = run_shell_command(find_cmd)
-                            # TODO: Handle file not found and other errors
-                            found_files = []
-                            for file in block_find_iter:
-                                found_files.append(file.rstrip('\n'))
-                            # TODO: Handle multiple files found
-                            if len(found_files) == 1:
-                                this_file = found_files[0]
-                                log.debug("Found blockfile [{0}] at loc [{1}]".format(this_block_file, this_file))
-                                tasklist[this_job_id][this_block_file] = "linking"
-                                # Find the mount point for this file
-                                this_file_part = find_mount_point(this_file)
-                                # ensure we have a .shred dir available to link into
-                                this_part_shred_dir = ospathjoin(this_file_part, conf.LINUXFS_SHRED_PATH)
-                                if not exists(this_part_shred_dir):
-                                    makedirs(this_part_shred_dir)
-                                # Link the blkfile to it
-                                link(this_file, ospathjoin(this_part_shred_dir, this_block_file))
-                                log.debug("Linked blockfile [{0}] at loc [{1}] to shred loc at [{2}]"
-                                          .format(this_block_file, this_file, this_part_shred_dir))
-                                tasklist[this_job_id][this_block_file] = "linked"
-                            else:
-                                log.error("Found unexpected number of instances of blockfile on the local OS filesystem.")
-                        elif tasklist[this_job_id][this_block_file] == "linked":
-                            log.info("blockfile [{0}] already linked")
-                    # update blockfile status' in job file
-                    file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", this_job_id, worker_id)
-                    # combined read/write doesn't work on this version of python, going for brute overwrite
-                    hdfs.write(file_path, dumps(tasklist[this_job_id]), overwrite=True)
+                )
             else:
-                log.info("Worker [{0}] found no blockfiles listed for this Datanode in active jobs")
+                ready_for_exit = finalise_client(job_id, target)
+                if ready_for_exit:
+                    exit(0)
+                else:
+                    raise StandardError("Unexpected program exit status, please refer to logs")
+
+
+def worker_workflow(passed_args):
+    # Determine identity
+    worker_id = get_worker_identity()
+    # wake from sleep mode
+    log.info("Worker [{0}] activating".format(worker_id))
+    # Establishing HDFS connection
+    connect_hdfs()
+    # check if there are jobs to be done
+    worklist = get_jobs_by_status('stage1complete')
+    # if no new do next section
+    if len(worklist) > 0:
+        log.info("New jobs found: [{0}]".format(worklist))
+        # connect to ZK
+        zk = connect_zk()
+        # for each job in list
+        for job_id in worklist:
+            # if no guid node indicating the lease is available
+            if zk.exists(conf.ZOOKEEPER['PATH'] + job_id):
+                result = prepare_blocklists(job_id)
+                if result == "success":
+                    log.info("Worker [{0}] successfully prepared blocklists for job [{0}]"
+                             .format(worker_id, job_id))
+                elif result == "pipped":
+                    log.info("Attempted to run blocklist preparation for job [{0}] but was beaten to it by"
+                             "another worker, are the workers on a concurrent schedule?".format(job_id))
+                else:
+                    raise StandardError("Unexpected return status from blocklist preparation task")
+    else:
+        log.info("No new jobs found")
+        pass
+    # Begin non-leader functionality for Worker
+    joblist = get_jobs_by_status('stage2copyblocks')
+    # If there are jobs
+    if len(joblist) > 0:
+        log.info("Worker [{0}] woke and found active jobs in status [stage2copyblocks]".format(worker_id))
+        tasklist = {}
+        # Parse jobs for files referencing this worker, and collect tasks
+        for job_id in joblist:
+            file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job_id, worker_id)
+            this_job_blocklist = {}
+            # cheaper IO to explicitly try to open the expected file than to list the dir here
+            try:
+                with hdfs.read(file_path) as reader:
+                    # Blocklist file for this DN in this job
+                    this_job_blocklist = loads(reader.read())
+                    # We only want to pick up new blocks
+                    # TODO: logic to handle recovery of failed jobs
+            except HdfsError:
+                # No blocklist file for this DN in this job
+                pass  # we've already set the blocklist to None above
+            if this_job_blocklist is not None:
+                tasklist[job_id] = this_job_blocklist
+                # This should result in a dict keyed by job_id, containing a subdict keyed by block id
+        if len(tasklist) > 0:
+            # foreach blockfile in job:
+            for this_job_id in tasklist:
+                for this_block_file in tasklist[this_job_id]:
+                    if tasklist[this_job_id][this_block_file] == "new":
+                        log.debug("Doing OS Find for blockfile [{0}] on worker [{1}] for job [{2}]"
+                                  .format(this_block_file, worker_id, this_job_id))
+                        tasklist[this_job_id][this_block_file] = "finding"
+                        # TODO: Set search root to HDFS FS root from configs
+                        find_root = "/"
+                        find_cmd = ["find", find_root, "-name", this_block_file]
+                        block_find_iter = run_shell_command(find_cmd)
+                        # TODO: Handle file not found and other errors
+                        found_files = []
+                        for file in block_find_iter:
+                            found_files.append(file.rstrip('\n'))
+                        # TODO: Handle multiple files found
+                        if len(found_files) == 1:
+                            this_file = found_files[0]
+                            log.debug("Found blockfile [{0}] at loc [{1}]".format(this_block_file, this_file))
+                            tasklist[this_job_id][this_block_file] = "linking"
+                            # Find the mount point for this file
+                            this_file_part = find_mount_point(this_file)
+                            # ensure we have a .shred dir available to link into
+                            this_part_shred_dir = ospathjoin(this_file_part, conf.LINUXFS_SHRED_PATH)
+                            if not exists(this_part_shred_dir):
+                                makedirs(this_part_shred_dir)
+                            # Link the blkfile to it
+                            link(this_file, ospathjoin(this_part_shred_dir, this_block_file))
+                            log.debug("Linked blockfile [{0}] at loc [{1}] to shred loc at [{2}]"
+                                      .format(this_block_file, this_file, this_part_shred_dir))
+                            tasklist[this_job_id][this_block_file] = "linked"
+                        else:
+                            log.error("Found unexpected number of instances of blockfile on the local OS filesystem.")
+                    elif tasklist[this_job_id][this_block_file] == "linked":
+                        log.info("blockfile [{0}] already linked")
+                # update blockfile status' in job file
+                file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", this_job_id, worker_id)
+                # combined read/write doesn't work on this version of python, going for brute overwrite
+                hdfs.write(file_path, dumps(tasklist[this_job_id]), overwrite=True)
         else:
-            log.info("Worker [{0}] found no jobs in status [stage2copyblocks]".format(worker_id))
+            log.info("Worker [{0}] found no blockfiles listed for this Datanode in active jobs")
+    else:
+        log.info("Worker [{0}] found no jobs in status [stage2copyblocks]".format(worker_id))
         #
         # if all blocks copied, attempt lease of guid for 1x sleep period minutes, else sleep for 1x period minutes
         # if lease:
@@ -504,22 +512,34 @@ def main():
         # run hdfs delete files -skiptrash, update status to stage2filesdeleted
         # update central status as stage2complete, update Dn status as Stage2complete
         # release lease, shutdown
-    elif args.mode is 'shredder':
-        pass
-        # wake on schedule
-        # Foreach job in subdir:
-        # if Stage2Complete
-        # Get DN tasklist for job
-        # Set DN status to Shredding for job
-        # Foreach blockfile:
-        # set status to shredding in tasklist
-        # run shred
-        # set status to shredded in tasklist
-        # when job complete, set DN status to Stage3complete
-        # Move job from incomplete to completed
-    else:
-        raise "Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode)
 
+
+def shredder_workflow(args):
+    pass
+    # wake on schedule
+    # Foreach job in subdir:
+    # if Stage2Complete
+    # Get DN tasklist for job
+    # Set DN status to Shredding for job
+    # Foreach blockfile:
+    # set status to shredding in tasklist
+    # run shred
+    # set status to shredded in tasklist
+    # when job complete, set DN status to Stage3complete
+    # Move job from incomplete to completed
+
+
+# ###################          End Workflow definitions           ##########################
 
 if __name__ == "__main__":
-    main()
+    # Program setup
+    args = init_program(sys.argv[1:])
+    # Determine operating mode and execute workflow
+    if args.mode is 'client':
+        client_workflow(args)
+    elif args.mode is 'worker':
+        worker_workflow(args)
+    elif args.mode is 'shredder':
+        shredder_workflow(args)
+    else:
+        raise "Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode)
