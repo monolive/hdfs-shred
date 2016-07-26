@@ -30,6 +30,9 @@ shred.log.setLevel(shred.logging.DEBUG)
 shred.conf.ZOOKEEPER['PATH'] = '/shredtest/'
 
 
+# ###################          Test environment setup functions            ##########################
+
+
 def generate_test_data():
     # Generate test data
     shred.log.info("Out of test data, generating new Test Data files...")
@@ -96,6 +99,9 @@ def teardown_module():
         zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
     else:
         shred.log.info("Skipping removal of test ZK Data")
+
+
+# ###################          Individual Function tests            ##########################
 
 
 def test_parse_args():
@@ -203,4 +209,10 @@ def test_prepare_blocklists():
     test_result = shred.prepare_blocklists(test_job_id)
     assert test_result == "success"
 
+
+# ###################          Data fuzzing tests            ##########################
+
 # TODO: Test for 0 size files that make fsck behave differently
+
+
+# ###################          Workflow Tests            ##########################

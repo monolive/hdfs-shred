@@ -5,7 +5,8 @@ Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS f
 With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.  
 
 ## Status
-Functionality incomplete; tests passing.
+Functionality incomplete; basic tests passing.
+THIS CODE IS NOT READY FOR USE ON ANY LIVE ENVIRONMENT.
 
 ## Summary
 Uses a three-phase approach to the secure shredding of files in HDFS, which match three operational modes for the program:
