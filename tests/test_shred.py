@@ -106,23 +106,23 @@ def teardown_module():
 
 def test_parse_args():
     shred.log.info("Testing argparse")
-    out = shred.parse_args(["-m", "client", "-f", "somefile"])
+    out = shred.parse_user_args(["-m", "client", "-f", "somefile"])
     assert out.filename == "somefile"
     assert out.mode == "client"
-    out = shred.parse_args(["-m", "worker"])
+    out = shred.parse_user_args(["-m", "worker"])
     assert out.mode == "worker"
     assert out.filename is None
-    out = shred.parse_args(["-m", "shredder"])
+    out = shred.parse_user_args(["-m", "shredder"])
     assert out.mode == "shredder"
     assert out.filename is None
     with pytest.raises(SystemExit):
-        out = shred.parse_args(["-m", "file"])
+        out = shred.parse_user_args(["-m", "file"])
     with pytest.raises(SystemExit):
-        out = shred.parse_args(["-m", "worker", "-f", "somefile"])
+        out = shred.parse_user_args(["-m", "worker", "-f", "somefile"])
     with pytest.raises(SystemExit):
-        out = shred.parse_args(["-v"])
+        out = shred.parse_user_args(["-v"])
     with pytest.raises(SystemExit):
-        out = shred.parse_args(["-h"])
+        out = shred.parse_user_args(["-h"])
 
 
 def test_connect_zk():
@@ -206,7 +206,7 @@ def test_prepare_blocklists():
     test_worklist = shred.get_jobs_by_status('stage1complete')
     assert test_worklist > 0
     zk = shred.connect_zk()
-    test_result = shred.prepare_blocklists(test_job_id)
+    test_result = shred.worker_leader_prepare_blocklists(test_job_id)
     assert test_result == "success"
 
 
