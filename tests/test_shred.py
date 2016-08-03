@@ -62,6 +62,26 @@ def update_test_files():
     shred.log.info("Test files are now [{0}]".format(test_files))
 
 
+def get_test_file():
+    try:
+        test_file = test_files.pop()
+    except IndexError:
+        generate_test_data()
+        update_test_files()
+        test_file = test_files.pop()
+    return test_file
+
+
+def ensure_job_id():
+    if not test_job_id:
+        my_test_file = get_test_file()
+        global test_job_id
+        hdfs = shred.ensure_hdfs_connect()
+        test_job_id, test_job_status = shred.s1_init_new_job()
+        test_job_id, test_job_status = shred.s1_ingest_targets(test_job_id, my_test_file)
+        shred.finalise_client(test_job_id, my_test_file)
+
+
 def setup_module():
     shred.log.info("Begin Setup")
     shred.log.info("Checking for existing test data")
@@ -95,7 +115,7 @@ def teardown_module():
     if remove_test_zkdata:
         shred.log.info("Removing test ZK Data")
         zk_host = shred.conf.ZOOKEEPER['HOST'] + ':' + str(shred.conf.ZOOKEEPER['PORT'])
-        zk = shred.connect_zk()
+        zk = shred.ensure_zk()
         zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
     else:
         shred.log.info("Skipping removal of test ZK Data")
@@ -125,38 +145,39 @@ def test_parse_args():
         out = shred.parse_user_args(["-h"])
 
 
-def test_connect_zk():
+def test_ensure_zk():
     shred.log.info("Testing ZooKeeper connector")
     # Good host
-    zk = shred.connect_zk()
+    zk = shred.ensure_zk()
     assert zk.state == 'CONNECTED'
 
 
 def test_get_fsck_output():
     shred.log.info("Testing FSCK information fetcher")
-    out = shred.get_fsck_output(test_files[-1])
+    out = shred.s2_get_fsck_output(test_files[-1])
     assert isinstance(out, collections.Iterator)
 
 
 def test_parse_blocks_from_fsck():
     shred.log.info("Testing FSCK parser")
-    fsck_content = shred.get_fsck_output(test_files[-1])
-    out = shred.parse_blocks_from_fsck(fsck_content)
+    fsck_content = shred.s2_get_fsck_output(test_files[-1])
+    out = shred.s2_parse_blocks_from_fsck(fsck_content)
     assert isinstance(out, dict)
     # TODO: Test dictionary entries for IP and list of blk_<num> entries
 
 
 def test_connect_hdfs():
     shred.log.info("Testing Connection to HDFS")
-    hdfs = shred.connect_hdfs()
+    hdfs = shred.ensure_hdfs_connect()
     # TODO: Write tests here
 
 
 def test_check_hdfs_for_target():
     shred.log.info("Testing HDFS File checker")
-    hdfs = shred.connect_hdfs()
+    hdfs = shred.ensure_hdfs_connect()
     # Test good file
-    out = shred.check_hdfs_for_target(test_files[-1])
+    my_test_file = test_files.pop()
+    out = shred.check_hdfs_for_target(my_test_file)
     assert out is True
     # Test bad file
     out = shred.check_hdfs_for_target('/tmp/notafile')
@@ -168,14 +189,14 @@ def test_check_hdfs_for_target():
 
 def test_init_new_job():
     shred.log.info("Testing Job Preparation Logic")
-    hdfs = shred.connect_hdfs()
-    job_id, job_status = shred.init_new_job()
+    hdfs = shred.ensure_hdfs_connect()
+    job_id, job_status = shred.s1_init_new_job()
     assert job_id is not None
     assert job_status == "stage1init"
 
     shred.log.info("Testing Target File Ingest")
     my_test_file = test_files.pop()
-    job_id, job_status = shred.ingest_targets(job_id, my_test_file)
+    job_id, job_status = shred.s1_ingest_targets(job_id, my_test_file)
     # this removes the test file from availability, so we have to pop it off the queue
     assert job_id is not None
     assert job_status == "stage1ingestComplete"
@@ -191,22 +212,11 @@ def test_get_worker_identity():
 
 def test_prepare_blocklists():
     # TODO: Rewrite Main workflow in shred.py into a wrapper function for each core component for easier testing
-    try:
-        my_test_file = test_files.pop()
-    except IndexError:
-        generate_test_data()
-        update_test_files()
-        my_test_file = test_files.pop()
-    if not test_job_id:
-        global test_job_id
-        hdfs = shred.connect_hdfs()
-        test_job_id, test_job_status = shred.init_new_job()
-        test_job_id, test_job_status = shred.ingest_targets(test_job_id, my_test_file)
-        shred.finalise_client(test_job_id, my_test_file)
+    ensure_job_id()
     test_worklist = shred.get_jobs_by_status('stage1complete')
     assert test_worklist > 0
-    zk = shred.connect_zk()
-    test_result = shred.worker_leader_prepare_blocklists(test_job_id)
+    zk = shred.ensure_zk()
+    test_result = shred.s2_main_workflow(test_job_id)
     assert test_result == "success"
 
 

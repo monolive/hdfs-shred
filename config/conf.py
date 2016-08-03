@@ -18,4 +18,7 @@ HDFS_SHRED_PATH = "/tmp/shred"
 LINUXFS_SHRED_PATH = ".shred"
 
 # Duration in minutes
+# Worker wait is delay between checks of worker activity
 WORKER_WAIT = 1
+# Leader wait is how long the each leader should wait for workers to complete distributed tasks
+LEADER_WAIT = 15
