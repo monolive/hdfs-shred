@@ -16,10 +16,10 @@ import argparse
 from time import sleep
 from json import dumps, loads
 from datetime import timedelta as dttd
-from uuid import uuid4
+from uuid import uuid4, UUID
 from socket import gethostname, gethostbyname
 from os.path import join as ospathjoin
-from os.path import dirname, realpath, ismount, exists, split
+from os.path import dirname, realpath, ismount, exists, split, isfile
 from os import link, makedirs
 from kazoo.client import KazooClient, KazooState
 from hdfs import Config, HdfsError
@@ -60,6 +60,7 @@ stage_1_fail = "s1_fail"
 # Stage 2: Worker Initial Leader stage; Takes charge of job and generates blocklists
 stage_2_init = "s2_init"   # Init indicates worker has woken and is attempting leader tasks
 stage_2_not_leader = "s2_nolead"
+stage_2_timeout = "s2_timeout"
 stage_2_leader = "s2_lead"  # active means that this worker is successfully leader and doing tasks
 stage_2_success = "s2_success"
 stage_2_fail = "s2_fail"
@@ -86,17 +87,22 @@ stage_4_fail = "s4_fail"
 stage_4_timeout = "s4_timeout"  # Used when a worker gains leader status but the job takes too long to complete
 
 # Stage 5: Shredder distributed Stage; Validates job status and worker blocklist status, then shreds shards
+stage_5_no_init = "s5_noinit"
 stage_5_init = "s5_init"
 stage_5_active = "s5_active"
+stage_5_skip = "s3_skip"  # Worker activated to find no files to shred
 stage_5_success = "s5_success"
 stage_5_fail = "s5_fail"
+stage_5_timeout = "s5_timeout"  # Used when a worker starts shredding but doesn't complete within timeout
 
 # Stage 6: Shredder leader Stage; takes charge of job, checks that all shredders are finished and closes job
 stage_6_init = "s6_init"
 stage_6_active = "s6_active"
 stage_6_success = "s6_success"
 stage_6_fail = "s6_fail"
-
+stage_6_timeout = "s6_timeout"  # Used when a worker gains leader status but the job takes too long to complete
+stage_6_not_leader = "s6_nolead"
+stage_6_no_init = "s6_noinit"
 
 # ###################          Common Functions           ##########################
 
@@ -116,7 +122,7 @@ def ensure_zk():
             .format(host, zk.state)
 
 
-def ensure_hdfs_connect():
+def ensure_hdfs():
     """Uses HDFS client module to connect to HDFS
     returns handle object"""
     if not hdfs:
@@ -151,14 +157,14 @@ def set_hdfs_file(job_id, component, content):
     else:
         raise StandardError("Function set_hdfs_file was passed an unrecognised component name")
     if file_path is not None:
-        log.debug("Setting status of component [{0}] at path [{1}] to [{2}]".format(component, file_path, content))
-        hdfs.write(file_path, content, overwrite=True)
+        log.debug("Setting component file [{0}] at path [{1}] to [{2}]".format(component, file_path, content))
+        hdfs.write(file_path, dumps(content), overwrite=True)
     else:
         raise ValueError("File Path not set for function set_hdfs_file with component [{0}] and content [{1}]"
                          .format(component, content))
 
 
-def get_hdfs_file(job_id, component):
+def get_hdfs_file(job_id, component, strict=True):
     file_content = None
     if component == "master":
         # The master component always updates the state of the job in the master job list
@@ -170,11 +176,21 @@ def get_hdfs_file(job_id, component):
     try:
         with hdfs.read(file_path) as reader:
             # expecting all content by this program to be serialised as json
-            file_content = loads(reader.read())
+            file_content = reader.read()
     except HdfsError:
-        # if the file does not exist or is empty, we will return None anyway
-        pass
-    return file_content
+        if strict:
+            raise StandardError("HDFSCli couldn't read a file from path [{0}]"
+                                .format(file_path))
+        else:
+            pass
+            # if not strict mode then we will return None
+    if file_content:
+        get_result = loads(file_content)
+        log.debug("Retrieved content [{2}] from component file [{0}] at path [{1}]"
+                  .format(component, file_path, get_result))
+    else:
+        get_result = file_content
+    return get_result
 
 
 def run_shell_command(command):
@@ -195,6 +211,7 @@ def check_hdfs_for_target(target):
     Returns True if file is Found.
     Returns Error details if it is not found.
     """
+    ensure_hdfs()
     log.debug("Checking validity of HDFS target [{0}]".format(target))
     target_details = hdfs.status(target, strict=False)
     log.debug("HDFS status is: [{0}]".format(target_details))
@@ -227,6 +244,10 @@ def parse_user_args(args):
         parser.error("--mode 'worker' or 'shredder' cannot be used to register a new filename for shredding."
                      " Please try '--mode client' instead.")
     log.debug("Argparsing complete, returning args to main function")
+    # forcing target to absolute path for safety
+    if result.filename:
+        temp = realpath(result.filename)
+        result.filename = temp
     return result
 
 
@@ -240,7 +261,8 @@ def get_worker_identity():
 
 def get_jobs_by_status(target_status):
     """Checks for the existance of new worker jobs and returns a list of them if they exist"""
-    ensure_hdfs_connect()
+    log.debug("Checking for jobs in status [{0}]".format(target_status))
+    ensure_hdfs()
     worker_job_list = []
     # check if dir exists as worker my load before client is ever used
     job_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs")
@@ -255,11 +277,15 @@ def get_jobs_by_status(target_status):
         dirlist = hdfs.list(job_path, status=True)
         for item in dirlist:
             if item[1]['type'] == 'FILE':
-                # TODO: Should wrap this in a try with HDFSError in case the connection drops
-                with hdfs.read(ospathjoin(job_path, item[0])) as reader:
-                    job_status = reader.read()
+                # item[0] is the filename, which for master status' is the job ID as a string
+                # we shall be OCD about things and validate it however.
+                job_status = get_hdfs_file(item[0], "master")
                 if job_status == target_status:
-                    worker_job_list.append(item[0])
+                    try:
+                        job_id = UUID(item[0], version=4)
+                        worker_job_list.append(str(job_id))
+                    except ValueError:
+                        pass
     return worker_job_list
 
 
@@ -277,6 +303,7 @@ def find_mount_point(path):
 def s1_init_new_job():
     """and generates job management files and dirs"""
     # Generate a guid for a job ID
+    ensure_hdfs()
     job_id = str(uuid4())
     log.debug("Generated uuid [{0}] for job identification".format(job_id))
     # Create directory named with a guid, create an initial status file in it for tracking this job
@@ -380,7 +407,7 @@ def get_workers_state_by_job(job_id):
             worker_state_map[stage_3_no_init].append(this_worker)
         elif this_worker_state == stage_3_fail:
             worker_state_map[stage_3_fail].append(this_worker)
-        elif this_worker_state in [stage_3_success, stage_3_skip]:
+        elif this_worker_state in [stage_3_success, stage_3_skip, stage_4_leader]:
             worker_state_map[stage_3_success].append(this_worker)
         elif this_worker_state in [stage_3_active, stage_3_init]:
             worker_state_map[stage_3_active].append(this_worker)
@@ -400,17 +427,18 @@ def get_workers_state_by_job(job_id):
     return result
 
 
-def get_this_worker_block_list_by_job(job_id):
+def get_this_worker_block_dict_by_job(job_id):
     worker_id = get_worker_identity()
+    ensure_hdfs()
     # Set status for this worker against this job
     set_hdfs_file(job_id, "worker_" + worker_id + "_status", "stage2checkingForBlockList")
-    this_job_worker_block_list = get_hdfs_file(job_id, ("worker_" + worker_id + "_blockfilelist"))
-    if this_job_worker_block_list is not None:
+    this_job_worker_block_dict = get_hdfs_file(job_id, ("worker_" + worker_id + "_blockfiledict"))
+    if this_job_worker_block_dict is not None:
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", "stage2blocklistFound")
     else:
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", "stage2noBlocklistFound")
         # Tasklist should now be either empty, or a dict keyed by block file id
-    return this_job_worker_block_list
+    return this_job_worker_block_dict
 
 
 # ###################          Workflow definitions           ##########################
@@ -420,71 +448,93 @@ def s2_main_workflow(job_id):
     """Attempts to take leadership for job preparation and creates the block-file lists for each datanode worker"""
     # attempt to kazoo lease new guid node for wait period minutes
     worker_id = get_worker_identity()
+    ensure_hdfs()
     set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_init)
     log.debug("Attempting to get leader lease for job [{0}]".format(job_id))
+    ensure_zk()
+    result = None
+    lease_path = conf.ZOOKEEPER['PATH'] + job_id
     lease = zk.NonBlockingLease(
-        path=conf.ZOOKEEPER['PATH'] + job_id,
+        path=lease_path,
         duration=dttd(minutes=conf.LEADER_WAIT),
-        identifier="Worker [{0}] preparing blocklists for job [{1}]".format(worker_id, job_id)
+        identifier="Worker [{0}] preparing blocklists".format(worker_id, job_id)
     )
     # http://kazoo.readthedocs.io/en/latest/api/recipe/lease.html
     if not lease:
         log.debug("Beaten to leasehold by another worker")
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_not_leader)
+        result = stage_2_not_leader
     else:
-        try:
-            # TODO: Add Lease management, there's probably a with... function here somewhere for it
-            log.debug("Got lease as leader on job, updating job status")
-            set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_leader)
-            log.debug("Preparing Blocklists for job [{0}]".format(job_id))
-            # get job target ( returns a list )
-            targets = get_target_by_jobid(job_id)
-            log.debug("Got target file(s) [{0}] for job".format(targets))
-            # get fsck data for targets
-            blocklists = {}
-            for target in targets:
-                fsck_data = s2_get_fsck_output(target)
-                # parse fsck data for blocklists
-                blocklists.update(s2_parse_blocks_from_fsck(fsck_data))
-            log.debug("Parsed FSCK output for target files: [{0}]".format(blocklists))
-            # match fsck output to worker_ids
-            # block IDs for workers are currently the IP of the datanode, which matches our worker_id in the utility
-            # Therefore no current need to do a match between the fsck output and the local worker ID
-            # However this isn't very robust and should probably be replaced with a better identity matcher
-            #
-            # write a per-DN file to hdfs job subdir for other workers to read
-            target_workers = blocklists.keys()
-            log.debug("Datanode list for these blockfiles is: [{0}]".format(target_workers))
-            for this_worker in target_workers:
-                this_worklist = {}
-                for blockfile in blocklists[this_worker]:
-                    this_worklist[blockfile] = stage_3_no_init
-                set_hdfs_file(job_id, "worker_" + this_worker + "_blockfilelist", dumps(this_worklist))
-                # Init the worker status file
+        while lease:
+            while result is None:
+                # Using while result to allow for more detailed failure states in further versions
+                if zk.state != KazooState.CONNECTED:
+                    log.error("Lost connection to ZooKeeper during leader actions, expiring leader activity")
+                    result = "disconnected"
+                # Update the state of the distributed workers from their status files on HDFS
+                log.debug("Worker [{0}] leading job [{1}] preparing blocklists for distributed workers"
+                          .format(worker_id, job_id))
+                log.debug("Got lease as leader on job, updating job status")
+                set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_leader)
+                log.debug("Preparing Blocklists for job [{0}]".format(job_id))
+                # get job target ( returns a list )
+                targets = get_target_by_jobid(job_id)
+                log.debug("Got target file(s) [{0}] for job".format(targets))
+                # get fsck data for targets
+                blocklists = {}
+                for target in targets:
+                    fsck_data = s2_get_fsck_output(target)
+                    # parse fsck data for blocklists
+                    blocklists.update(s2_parse_blocks_from_fsck(fsck_data))
+                log.debug("Parsed FSCK output for target files: [{0}]".format(blocklists))
+                # match fsck output to worker_ids
+                # block IDs for workers are currently the IP of the datanode, which matches our worker_id in the utility
+                # Therefore no current need to do a match between the fsck output and the local worker ID
+                # However this isn't very robust and should probably be replaced with a better identity matcher
+                #
+                # write a per-DN file to hdfs job subdir for other workers to read
+                target_workers = blocklists.keys()
+                log.debug("Datanode list for these blockfiles is: [{0}]".format(target_workers))
+                for this_worker in target_workers:
+                    this_worklist = {}
+                    for blockfile in blocklists[this_worker]:
+                        this_worklist[blockfile] = stage_3_no_init
+                    set_hdfs_file(job_id, "worker_" + this_worker + "_blockfiledict", this_worklist)
+                    # Init the worker status file
+                    set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_no_init)
+                # write list of workers to file for later retrieval
+                set_hdfs_file(job_id, "worker_list", target_workers)
+                log.debug("Completed leader tasks for blocklist preparation")
                 set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_no_init)
-            # write list of workers to file for later retrieval
-            set_hdfs_file(job_id, "worker_list", dumps(target_workers))
-            log.debug("Completed leader tasks for blocklist preparation, returning from function")
-            # TODO: Look for a method to explicitly release the lease when done
-            # apparently there's no release lease command in this recipe, so it'll just timeout?
-            # return success status
-            # set this worker ready for stage 3
-            set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_no_init)
-            return stage_2_success
-        except:
-            # TODO: Write better pass/fail controls for this process
-            set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_fail)
-            return stage_2_fail
+                result = stage_2_success
+            # Broken out of while no result loop, now break lease loop
+            lease = False
+        else:
+            if result is None:
+                log.warning("Worker timed out preparing blocklist, resetting status for another worker attempt")
+                set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_2_not_leader)
+                return stage_2_timeout
+            elif result in [stage_2_success, stage_2_fail]:
+                # Cleanup lease before returning result
+                lease = zk.NonBlockingLease(
+                    path=lease_path,
+                    duration=dttd(seconds=1),
+                    identifier="Worker [{0}] preparing blocklists".format(worker_id, job_id)
+                )
+                sleep(2)
+                return result
+            else:
+                return stage_2_fail
 
 
 def s3_main_workflow(job_id, block_list):
     worker_id = get_worker_identity()
     # allowing for restart of job where shreddirs was partially completed.
-    potential_shred_dirs = get_hdfs_file(job_id, "worker_" + worker_id + "_shredfilelist")
-    if potential_shred_dirs is not None:
-        shred_dirs = potential_shred_dirs
+    potential_shred_files = get_hdfs_file(job_id, "worker_" + worker_id + "_shredfilelist", strict=False)
+    if potential_shred_files is not None:
+        shred_file_list = potential_shred_files
     else:
-        shred_dirs = []
+        shred_file_list = {}
     set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_active)
     for this_block in block_list:
         if block_list[this_block] in [stage_3_no_init, stage_3_finding_block, stage_3_linking_block]:
@@ -492,9 +542,9 @@ def s3_main_workflow(job_id, block_list):
                       .format(this_block, worker_id, job_id))
             # slightly redundant to set init, but if the hdfs root gets more complicated it's good form
             block_list[this_block] = stage_3_init
-            # TODO: Set search root to HDFS FS root from configs
             block_list[this_block] = stage_3_finding_block
-            find_root = "/"
+            # TODO: More robust method of getting the HDFS dir root from hdfs-site.xml
+            find_root = conf.HDFS_ROOT
             find_cmd = ["find", find_root, "-name", this_block]
             block_find_iter = run_shell_command(find_cmd)
             # TODO: Handle file not found and other errors
@@ -517,7 +567,7 @@ def s3_main_workflow(job_id, block_list):
                     # Link the blkfile to it
                     link(this_file, linked_filepath)
                     # Record the destination ready for shredding later
-                    shred_dirs.append(linked_filepath)
+                    shred_file_list[linked_filepath] = stage_5_no_init
                     log.debug("Linked blockfile [{0}] at loc [{1}] to shred loc at [{2}]"
                               .format(this_block, this_file, this_mount_shred_dir))
                     block_list[this_block] = stage_3_success
@@ -535,35 +585,33 @@ def s3_main_workflow(job_id, block_list):
             log.warning("blockfile [{0}] in unexpected state [{1}]"
                         .format(this_block, block_list[this_block]))
     # update the resulting status of the blockfiles to the job blocklist regardless of outcome
-    set_hdfs_file(job_id, "worker_" + worker_id + "_blockfilelist", dumps(block_list))
+    set_hdfs_file(job_id, "worker_" + worker_id + "_blockfiledict", block_list)
     # write out the shred paths for this job for later reference
-    set_hdfs_file(job_id, "worker_" + worker_id + "_shredfilelist", dumps(shred_dirs))
+    # TODO: Rework to allow for the job to be restarted
+    set_hdfs_file(job_id, "worker_" + worker_id + "_shredfiledict", shred_file_list)
     # sanity test if linking is completed successfully
     linking_status = []
     for this_block in block_list:
         linking_status.append(block_list[this_block])
     if len(set(linking_status)) == 1 and stage_3_success in set(linking_status):
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_success)
-        log.info("Worker [{0}] successfully completed stage 3 for job [{1}]"
-                 .format(worker_id, job_id))
         return stage_3_success
     else:
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_3_fail)
-        log.warning("Worker [{0}] failed one or more tasks for stage 3 of job [{1}]"
-                    .format(worker_id, job_id))
         return stage_3_fail
 
 
 def s4_main_workflow(job_id):
     ensure_zk()
-    ensure_hdfs_connect()
+    ensure_hdfs()
     worker_id = get_worker_identity()
     result = None
     # we use a non-blocking lease for this job, so that another worker can move onto a different job
+    lease_path = conf.ZOOKEEPER['PATH'] + job_id
     lease = zk.NonBlockingLease(
-        path=conf.ZOOKEEPER['PATH'] + job_id,
+        path=lease_path,
         duration=dttd(minutes=conf.LEADER_WAIT),
-        identifier="Worker [{0}] preparing HDFS delete for job [{1}]".format(worker_id(), job_id)
+        identifier="Worker [{0}] preparing HDFS delete for job [{1}]".format(worker_id, job_id)
     )
     if not lease:
         log.info("Worker [{0}] did not gain leader lease for job [{1}]".format(worker_id, job_id))
@@ -573,6 +621,7 @@ def s4_main_workflow(job_id):
     else:
         log.info("Worker [{0}] gained leader lease for job [{1}]".format(worker_id, job_id))
         set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_4_leader)
+        # TODO: Refactor with_zk function as wrapper for all leader tasks to reduce duplicated code
         while lease:
             while result is None:
                 if zk.state != KazooState.CONNECTED:
@@ -584,7 +633,7 @@ def s4_main_workflow(job_id):
                 # GOGO Stage 4
                 workers_state = get_workers_state_by_job(job_id)
                 if workers_state == stage_3_success:
-                    # All workers have reported completing stage 3 successfully
+                    # All workers have reported completing stage 3 successfully or are in later stages
                     log.debug("Worker [{0}] leading job [{1}] all worker linking tasks reporting as completed"
                               .format(worker_id, job_id))
                     # TODO: Insert final sanity check before running delete of file from HDFS
@@ -631,22 +680,89 @@ def s4_main_workflow(job_id):
                     log.warning("Unexpected state [{0}] returned from workers for job [{1}], bailing"
                                 .format(workers_state, job_id))
                     result = stage_4_fail
+            # We should only get here when result is set to break the outcome loop
+            lease = False
         else:
-            # We should only be here if the lease expired
-            return stage_4_timeout
-    if result is not None:
-        # Looks like the we completed this task in some manner without faulting, returning the result
-        return result
+            if result is None:
+                return stage_4_timeout
+            elif result in [stage_4_success, stage_4_fail]:
+                # Cleanup lease before returning result
+                lease = zk.NonBlockingLease(
+                    path=lease_path,
+                    duration=dttd(seconds=1),
+                    identifier="Worker [{0}] preparing blocklists".format(worker_id, job_id)
+                )
+                sleep(2)
+                # Looks like the we completed this task in some manner without faulting, returning the result
+                return result
+            else:
+                # A None or unexpected result indicates some kind of weird error and therefore also a failure
+                return stage_4_fail
+
+
+def s5_main_workflow(job_id):
+    ensure_hdfs()
+    worker_id = get_worker_identity()
+    result = None
+    shred_file_dict = get_hdfs_file(job_id, "worker_" + worker_id + "_shredfiledict")
+    if len(shred_file_dict) > 0:
+        set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_5_active)
+        for target_file in shred_file_dict:
+            if shred_file_dict[target_file] in [stage_5_no_init, stage_5_timeout]:
+                pass
+                # set status to shredding in tasklist
+                # run shred
+                # set status to shredded in tasklist
+            elif shred_file_dict[target_file] == stage_5_success:
+                # already done, skip
+                pass
+            elif shred_file_dict[target_file] == stage_5_active:
+                # This shouldn't happen without a weird failure, admin to check
+                log.critical("Shredder found file in active shredding state, are you running multiple threads?")
+                result = stage_5_fail
+            else:
+                # Unexpected status, failing
+                log.critical("Shredder found a target file [{0}] in an unexpected status of [{1}]"
+                             .format(target_file, shred_file_dict[target_file]))
+        log.debug("Finished processing shredder tasks for job [{0}]".format(job_id))
+        # write back status of shredding regardless of outcome
+        set_hdfs_file(job_id, "worker_" + worker_id + "_shredfiledict", shred_file_dict)
+        file_statuses = []
+        for target_file in shred_file_dict:
+            file_statuses.append(shred_file_dict[target_file])
+        if len(set(file_statuses)) == 1 and stage_5_success in set(file_statuses):
+            set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_5_success)
+            result = stage_5_success
+        else:
+            set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_5_fail)
+            result = stage_5_fail
     else:
-        return stage_4_fail
+        set_hdfs_file(job_id, "worker_" + worker_id + "_status", stage_5_skip)
+        result = stage_5_skip
+    if result is None:
+        return stage_5_fail
+    else:
+        return result
+    
+    # Get DN tasklist for job
+    # Set DN status to Shredding for job
+    # Foreach blockfile:
+    
+
+
+def s6_main_workflow(job_id):
+    pass
+    # when job complete, set DN status to Stage5complete
+    # Move job from incomplete to completed
+
 
 # ###################          Begin main definitions           ##########################
 
 
 def init_program(passed_args):
-    log.info("shred.py called with args [{0}]").format(sys.argv[1:])
+    log.info("shred.py called with args [{0}]".format(passed_args))
     log.debug("Parsing args using Argparse module.")
-    parsed_args = parse_user_args(sys.argv[1:])
+    parsed_args = parse_user_args(passed_args)
     # TODO: Move to full configuration file validation function
     log.debug("Checking for config parameters.")
     if not conf.VERSION:
@@ -654,29 +770,29 @@ def init_program(passed_args):
             "Version number in config.py not found, please check configuration file is available and try again."
         )
     # Test necessary connections
-    ensure_hdfs_connect()
+    ensure_hdfs()
     # Check directories etc. are setup
     hdfs.makedirs(conf.HDFS_SHRED_PATH)
     # TODO: Further Application setup tests
     return parsed_args
 
 
-def client_main(passed_args):
+def client_main(target):
     log.debug("Detected that we're running in 'client' Mode")
     # GOGO Stage 1
-    # forcing target to be absolute pathed for safety
-    target = realpath(passed_args.file_to_shred)
-    # TODO: Validate passed file target(s) further, for ex trailing slashes or actually a directory
+    # TODO: Validate passed file target(s) further, for ex trailing slashes or actually a directory in arg parse
     log.debug("Checking if file exists in HDFS")
     target_exists = check_hdfs_for_target(target)
     if target_exists is not True:
-        raise "Submitted File not found on HDFS: [{0}]".format(target)
+        raise StandardError("Submitted File not found on HDFS: [{0}]"
+                            .format(target))
     else:
         # By using the client to move the file to the shred location we validate that the user has permissions
         # to call for the delete and shred
         job_id, job_status = s1_init_new_job()
-        if stage_1_init == job_status:
-            raise "Could not create job for file: [{0}]".format(target)
+        if job_status != stage_1_init:
+            raise StandardError("Could not create job for file: [{0}]"
+                                .format(target))
         else:
             log.info("Created job id [{0}] for target [{1}]. Current status: [{2}]".format(
                 job_id, target, job_status
@@ -692,16 +808,16 @@ def client_main(passed_args):
             elif status == stage_1_success:
                 log.debug("Job [{0}] prepared, exiting with success".format(job_id))
                 print("Successfully created Secure Delete job for file [{0}]".format(target))
-                exit(0)
+                return stage_1_success, job_id
             else:
                 raise StandardError("Unexpected status returned from function [ingest_targets]."
                                     "Please check logs for additional information.")
 
 
-def worker_main(passed_args):
+def worker_main():
     worker_id = get_worker_identity()
     log.info("Worker [{0}] activating".format(worker_id))
-    ensure_hdfs_connect()
+    ensure_hdfs()
     # GOGO Stage 2
     stage2_jobs = get_jobs_by_status(stage_1_success)
     if len(stage2_jobs) > 0:
@@ -712,18 +828,22 @@ def worker_main(passed_args):
             # Attempt to get lease and run leader active tasks
             result = s2_main_workflow(s2_job)
             if result == stage_2_success:
-                log.info("Worker [{0}] successfully prepared blocklists for job [{0}]"
+                log.info("Worker [{0}] successfully completed stage 2 for job [{0}]"
                          .format(worker_id, s2_job))
                 set_hdfs_file(s2_job, "master", stage_2_success)
             elif result == stage_2_fail:
                 set_hdfs_file(s2_job, "master", stage_2_fail)
-                raise StandardError("Process failed while preparing blocklists for target files in job [{0}]"
+                raise StandardError("Process failed at stage 2 in job [{0}]"
                                     "Please refer to log for further details".format(s2_job))
+            elif result == stage_2_timeout:
+                # If blocklist job timed out, resetting job to try again with another worker run
+                log.alert("Worker timed out on stage 2, resetting job to stage_1_success for retry")
+                set_hdfs_file(s2_job, "master", stage_1_success)
             else:
-                raise StandardError("Unexpected return status from blocklist preparation task")
+                raise StandardError("Unexpected return status from stage 2 task")
         log.info("All stage 2 jobs processed, continuing to look for stage 3 jobs...")
     else:
-        log.info("No stage 2 jobs found, proceeding to look for stage 3 jobs")
+        log.info("No jobs ready for stage 2 found, proceeding to look for stage 3 jobs")
         pass
     # End Stage 2
     #
@@ -732,12 +852,12 @@ def worker_main(passed_args):
     if len(stage3_list) > 0:
         log.info("Worker [{0}] found active jobs in status [{1}]".format(worker_id, stage_2_success))
         for s3_job in stage3_list:
-            this_worker_block_list = get_this_worker_block_list_by_job(s3_job)
-            if this_worker_block_list is not None:
+            this_worker_block_dict = get_this_worker_block_dict_by_job(s3_job)
+            if this_worker_block_dict is not None:
                 set_hdfs_file(s3_job, "worker_" + worker_id + "_status", stage_3_init)
-                s3_result = s3_main_workflow(s3_job, this_worker_block_list)
+                s3_result = s3_main_workflow(s3_job, this_worker_block_dict)
             else:
-                log.info("Worker [{0}] found no blocklist to process for job [{1}]"
+                log.info("Worker [{0}] found no blocklist for stage 3 for job [{1}]"
                          .format(worker_id, s3_job))
                 set_hdfs_file(s3_job, "worker_" + worker_id + "_status", stage_3_skip)
                 s3_result = stage_3_skip
@@ -745,12 +865,12 @@ def worker_main(passed_args):
                 log.info("Worker [{0}] completed stage 3 successfully for job [{1}]"
                          .format(worker_id, s3_job))
             else:
-                log.warning("Worker [{0}] failed in one or more stage 3 tasks for job [{1}]."
+                log.critical("Worker [{0}] failed in one or more stage 3 tasks for job [{1}]."
                             "This job will require admin intervention to proceed."
                             .format(worker_id, s3_job))
         log.info("All stage 3 jobs processed, continuing to look for stage 4 jobs...")
     else:
-        log.info("No stage 3 jobs found, proceeding to look for stage 4 jobs")
+        log.info("No jobs ready for stage 3 found, proceeding to look for stage 4 jobs")
         pass
     # End Stage 3
     #
@@ -762,9 +882,10 @@ def worker_main(passed_args):
         for s4_job in stage4_list:
             this_worker_status = get_hdfs_file(s4_job, "worker_" + worker_id + "_status")
             if this_worker_status not in [stage_3_skip, stage_3_success, stage_4_init, stage_4_timeout]:
-                log.warning("Worker [{0}] is in status [{2}] for job [{1}], which is not valid to run stage 4 leader."
+                log.alert("Worker [{0}] is in status [{2}] for job [{1}], which is not valid to run stage 4 leader."
                             "Please check the status of all workers to find and correct any blockage."
                             .format(worker_id, s4_job, this_worker_status))
+                return stage_4_fail
             else:
                 # This worker is in a valid status for s4 leadership
                 set_hdfs_file(s4_job, "worker_" + worker_id + "_status", stage_4_init)
@@ -777,7 +898,7 @@ def worker_main(passed_args):
                     log.warning("One or more worker tasks have failed for job [{0}]"
                                 "Exiting so the administrator can clean up.".format(s4_job))
                     set_hdfs_file(s4_job, "worker_" + worker_id + "_status", stage_4_fail)
-                    sys.exit(1)
+                    return stage_4_fail
                 elif s4_result == stage_4_timeout:
                     # either the leader job timed out or lost connectivity to the cluster
                     log.info("Worker [{0}] lease for leading job [{1}] expired without completion, moving on..."
@@ -790,38 +911,95 @@ def worker_main(passed_args):
                 else:
                     raise Exception("Worker tasks returned an unexpected status, bailing...")
         log.info("All stage 4 jobs processed, exiting...")
-        sys.exit(0)
+        return stage_4_success
     else:
-        log.info("No stage 4 jobs found, exiting...")
-        sys.exit(0)
+        log.info("No jobs ready for stage 4 found, exiting...")
+        return stage_4_no_init
 
 
-def shredder_main(passed_args):
-    pass
-    # wake on schedule
-    # Foreach job in subdir:
-    # if Stage4Complete
-    # Get DN tasklist for job
-    # Set DN status to Shredding for job
-    # Foreach blockfile:
-    # set status to shredding in tasklist
-    # run shred
-    # set status to shredded in tasklist
-    # when job complete, set DN status to Stage5complete
-    # Move job from incomplete to completed
+def shredder_main():
+    worker_id = get_worker_identity()
+    log.info("Shredder [{0}] activating".format(worker_id))
+    ensure_hdfs()
+    # GOGO Stage 5
+    stage5_jobs = get_jobs_by_status(stage_4_success)
+    if len(stage5_jobs) > 0:
+        log.info("New jobs found: [{0}]".format(stage5_jobs))
+        # referring to 's2_job' instead of generic 'job_id' to avoid maintainer confusion
+        for s5_job in stage5_jobs:
+            set_hdfs_file(s5_job, "master", stage_5_init)
+            result = s5_main_workflow(s5_job)
+            if result == stage_5_success:
+                log.info("Shredder [{0}] successfully completed stage 5 for job [{0}]"
+                         .format(worker_id, s5_job))
+            elif result == stage_5_fail:
+                raise StandardError("Process failed at stage 2 in job [{0}]"
+                                    "Please refer to log for further details".format(s5_job))
+            elif result == stage_5_timeout:
+                log.alert("Worker timed out on stage 5, job will resume next run")
+            else:
+                raise StandardError("Unexpected return status from stage 5 task")
+        log.info("All stage 5 jobs processed, continuing to look for stage 6 jobs...")
+    else:
+        log.info("No jobs ready for stage 5 found, proceeding to look for stage 6 jobs")
+        pass
+    # End Stage 5
+    #
+    # GOGO Stage 6
+    stage6_list = get_jobs_by_status(stage_4_success)
+    if len(stage6_list) > 0:
+        for s6_job in stage6_list:
+            this_worker_status = get_hdfs_file(s6_job, "worker_" + worker_id + "_status")
+            if this_worker_status not in [stage_5_skip, stage_5_success, stage_6_init, stage_6_timeout]:
+                log.alert("Shredder [{0}] is in status [{2}] for job [{1}], which is not valid to run stage 6 leader."
+                          "Please check the status of all shredders to find and correct any blockage."
+                          .format(worker_id, s6_job, this_worker_status))
+                return stage_6_fail
+            else:
+                # This worker is in a valid status for s6 leadership
+                set_hdfs_file(s6_job, "worker_" + worker_id + "_status", stage_6_init)
+                s6_result = s6_main_workflow(s6_job)
+                if s6_result == stage_6_success:
+                    log.info("All shredder tasks completed successfully for job [{0}]".format(s6_job))
+                    set_hdfs_file(s6_job, "worker_" + worker_id + "_status", stage_6_success)
+                elif s6_result == stage_6_fail:
+                    log.warning("One or more shredder tasks have failed for job [{0}]"
+                                "Exiting so the administrator can clean up.".format(s6_job))
+                    set_hdfs_file(s6_job, "worker_" + worker_id + "_status", stage_6_fail)
+                    return stage_6_fail
+                elif s6_result == stage_6_timeout:
+                    # either the leader job timed out or lost connectivity to the cluster
+                    log.info("Shredder [{0}] lease for leading job [{1}] expired without completion, moving on..."
+                             .format(worker_id, s6_job))
+                    set_hdfs_file(s6_job, "worker_" + worker_id + "_status", stage_6_timeout)
+                elif s6_result == stage_6_not_leader:
+                    log.info("Shredder [{0}] did not gain leader lease for job [{1}], moving on..."
+                             .format(worker_id, s6_job))
+                    # worker status stays as stage_6_init
+                else:
+                    raise Exception("Shredder tasks returned an unexpected status, bailing...")
+        log.info("All stage 6 jobs processed, exiting...")
+        return stage_6_success
+    else:
+        log.info("No jobs ready for stage 6 found, exiting...")
+        return stage_6_no_init
 
 
 # ###################          main program           ##########################
 
 if __name__ == "__main__":
-    # Program setup
     args = init_program(sys.argv[1:])
-    # Determine operating mode and execute workflow
+    main_result = None
     if args.mode is 'client':
-        client_main(args)
+        main_result, new_job_id = client_main(args.filename)
     elif args.mode is 'worker':
-        worker_main(args)
+        main_result = worker_main()
     elif args.mode is 'shredder':
-        shredder_main(args)
+        main_result = shredder_main()
     else:
         StandardError("Bad operating mode [{0}] detected. Please consult program help and try again.".format(args.mode))
+    if main_result is not None and main_result in \
+            [stage_1_success, stage_4_success, stage_4_no_init, stage_6_success, stage_6_no_init]:
+        sys.exit(0)
+    else:
+        sys.exit(1)

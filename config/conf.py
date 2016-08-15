@@ -7,6 +7,8 @@ VERSION = "0.0.4"
 TEST_MODE = True
 LOG_LEVEL = "DEBUG"
 
+HDFS_ROOT = '/hadoop/hdfs/data'
+
 ZOOKEEPER = {
     'HOST': 'localhost',
     'PORT': 2181,
