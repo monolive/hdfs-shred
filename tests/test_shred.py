@@ -225,7 +225,7 @@ def test_parse_blocks_from_fsck():
     shred.log.info("Testing FSCK parser")
     test_file = get_test_file()
     fsck_content = shred.s2_get_fsck_output(test_file)
-    out = shred.s2_parse_blocks_from_fsck(fsck_content)
+    out = shred.parse_fsck_iter(fsck_content)
     assert isinstance(out, dict)
 
 @pytest.mark.slow
