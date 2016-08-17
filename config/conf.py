@@ -19,6 +19,10 @@ HDFS_SHRED_PATH = "/tmp/shred"
 
 LINUXFS_SHRED_PATH = ".shred"
 
+# Number of times to overwrite the file before writing out zeros and removing it from the filesystem
+# a SHRED_COUNT of 6 will overwrite the file 7 times; 6 with random garbage, and the 7th as zeros.
+SHRED_COUNT = 6
+
 # Duration in minutes
 # Worker wait is delay between checks of worker activity
 WORKER_WAIT = 1

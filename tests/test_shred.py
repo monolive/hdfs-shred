@@ -25,7 +25,7 @@ test_files = []
 # Test control Params
 remove_test_files = False
 remove_test_zkdata = True
-remove_test_jobs = False
+remove_test_jobs = True
 
 # Config overrides
 shred.log.setLevel(shred.logging.DEBUG)
@@ -34,6 +34,47 @@ shred.conf.LINUXFS_SHRED_PATH = ".testshred"
 shred.conf.HDFS_SHRED_PATH = "/tmp/testshred"
 
 # ###################          Test Environment setup   ##########################
+
+
+def setup_module():
+    # Moved data setup and cleanup to individual tests
+    # It's slower overall, but cleaner if tests are to be run individually
+    pass
+
+
+def teardown_module():
+    shred.log.info("Begin Teardown...")
+    # Remove test data
+    if remove_test_files:
+        shred.log.info("Removing Test Data")
+        rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", ospathjoin(test_file_path, test_file_dir)]
+        rmdir_iter = shred.run_shell_command(rmdir_cmd)
+        for line in rmdir_iter:
+            shred.log.info(line)
+    else:
+        shred.log.info("Skipping removal of test data")
+    if remove_test_zkdata:
+        shred.log.info("Removing test ZK Data")
+        shred.ensure_zk()
+        shred.zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
+    else:
+        shred.log.info("Skipping removal of test ZK Data")
+    if remove_test_jobs:
+        clear_test_jobs()
+    else:
+        shred.log.info("Skipping removal of test jobs")
+
+
+# ###################          Test Data Controls   ##########################
+
+
+def clear_test_jobs():
+    shred.log.info("Removing test jobs")
+    rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", ospathjoin(shred.conf.HDFS_SHRED_PATH)]
+    rmdir_iter = shred.run_shell_command(rmdir_cmd)
+    for line in rmdir_iter:
+        shred.log.info(line)
+    # TODO: This should also check and remove blockfiles moved to the .shredtest dir on each mount
 
 
 def generate_test_data():
@@ -75,56 +116,12 @@ def get_test_file():
     return test_file
 
 
-def ensure_job_id():
-    if not test_job_id:
-        my_test_file = get_test_file()
-        global test_job_id
-        test_job_id, test_job_status = shred.s1_init_new_job()
-        test_job_id, test_job_status = shred.s1_ingest_targets(test_job_id, my_test_file)
-
-
-def setup_module():
-    # Moved data setup and cleanup to individual tests
-    # It's slower overall, but cleaner if tests are to be run individually
-    pass
-
-
-def teardown_module():
-    shred.log.info("Begin Teardown...")
-    # Remove test data
-    if remove_test_files:
-        shred.log.info("Removing Test Data")
-        rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", ospathjoin(test_file_path, test_file_dir)]
-        rmdir_iter = shred.run_shell_command(rmdir_cmd)
-        for line in rmdir_iter:
-            shred.log.info(line)
-    else:
-        shred.log.info("Skipping removal of test data")
-    if remove_test_zkdata:
-        shred.log.info("Removing test ZK Data")
-        shred.ensure_zk()
-        shred.zk.delete(path=shred.conf.ZOOKEEPER['PATH'], recursive=True)
-    else:
-        shred.log.info("Skipping removal of test ZK Data")
-    if remove_test_jobs:
-        clear_test_jobs()
-    else:
-        shred.log.info("Skipping removal of test jobs")
-
-
-def clear_test_jobs():
-    shred.log.info("Removing test jobs")
-    rmdir_cmd = ["hdfs", "dfs", "-rm", "-f", "-r", "-skipTrash", ospathjoin(shred.conf.HDFS_SHRED_PATH)]
-    rmdir_iter = shred.run_shell_command(rmdir_cmd)
-    for line in rmdir_iter:
-        shred.log.info(line)
-    # TODO: This should also check and remove blockfiles moved to the .shredtest dir on each mount
-
 # ###################          Main workflow tests            ##########################
 
 
 @pytest.mark.slow
 def test_init_program():
+    # This simply tests the code pathway in init_program; parse args is tested independently
     test_file = get_test_file()
     test_args = ["-m", "client", "-f", test_file]
     args = shred.init_program(test_args)
@@ -134,23 +131,29 @@ def test_init_program():
     assert path_test['type'] == "DIRECTORY"
 
 
-@pytest.mark.slow
-def test_client_main():
-    with pytest.raises(StandardError):
-        shred.client_main('not_a_file')
+def test_run_stage_1():
+    # test a bad file
+    result, test_job_id = shred.run_stage(shred.stage_1, 'not_a_file')
+    assert result == shred.status_fail
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_fail in job_status
+    data_status = shred.retrieve_job_info(test_job_id, "data_status")
+    assert shred.status_fail in data_status
+    # test a good file
     test_file = get_test_file()
-    result, test_job_id = shred.client_main(test_file)
-    assert result == shred.stage_1_success
-    job_status = shred.get_hdfs_file(test_job_id, "master")
-    assert job_status == shred.stage_1_success
-    data_status = shred.get_hdfs_file(test_job_id, "data_status")
-    assert data_status == shred.stage_1_success
+    result, test_job_id = shred.run_stage(shred.stage_1, test_file)
+    assert result == shred.status_success
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_success in job_status
+    data_status = shred.retrieve_job_info(test_job_id, "data_status")
+    assert shred.status_success in data_status
     # Only tests a single file
-    target = shred.get_hdfs_file(test_job_id, "data_filelist")
+    target = shred.retrieve_job_info(test_job_id, "data_file_list")
     target_exists = shred.hdfs.status(target, strict=False)
     assert target_exists is not None
 
 
+@pytest.mark.slow
 def test_worker_main():
     shred.log.info("Clearing all test jobs to prepare an uncluttered test run for worker_main()")
     clear_test_jobs()
@@ -165,23 +168,8 @@ def test_worker_main():
     assert result == shred.stage_4_success
 
 
-def test_shredder_main():
-    pass
-
-
-def test_s2_main_workflow():
-    pass
-
-
-def test_s3_main_workflow():
-    pass
-
-
-def test_s4_main_workflow():
-    pass
-
-
 # ###################          Individual Function tests            ##########################
+
 
 @pytest.mark.slow
 def test_parse_user_args():
@@ -204,6 +192,7 @@ def test_parse_user_args():
     with pytest.raises(SystemExit):
         shred.parse_user_args(["-h"])
 
+
 @pytest.mark.slow
 def test_ensure_zk():
     shred.log.info("Testing ZooKeeper connector")
@@ -213,20 +202,6 @@ def test_ensure_zk():
     shred.zk.stop()
     assert shred.zk.state == 'LOST'
 
-@pytest.mark.slow
-def test_get_fsck_output():
-    shred.log.info("Testing FSCK information fetcher")
-    test_file = get_test_file()
-    out = shred.s2_get_fsck_output(test_file)
-    assert isinstance(out, collections.Iterator)
-
-@pytest.mark.slow
-def test_parse_blocks_from_fsck():
-    shred.log.info("Testing FSCK parser")
-    test_file = get_test_file()
-    fsck_content = shred.s2_get_fsck_output(test_file)
-    out = shred.parse_fsck_iter(fsck_content)
-    assert isinstance(out, dict)
 
 @pytest.mark.slow
 def test_ensure_hdfs():
@@ -236,49 +211,10 @@ def test_ensure_hdfs():
     # TODO: This really needs connection tracking
 
 
-def test_set_hdfs_file():
-    pass
-
-
-def test_get_hdfs_file():
-    pass
-
-
+@pytest.mark.slow
 def test_run_shell_command():
     pass
 
-@pytest.mark.slow
-def test_check_hdfs_for_target():
-    shred.log.info("Testing HDFS File checker")
-    shred.ensure_hdfs()
-    # Test good file
-    test_file = get_test_file()
-    out = shred.check_hdfs_for_target(test_file)
-    assert out is True
-    # Test bad file
-    out = shred.check_hdfs_for_target('/tmp/notafile')
-    assert out is False
-    # test passing a dir
-    out = shred.check_hdfs_for_target('/tmp')
-    assert out is False
-
-@pytest.mark.slow
-def test_s1_init_new_job():
-    shred.log.info("Testing Job Preparation Logic")
-    shred.ensure_hdfs()
-    job_id, job_status = shred.s1_init_new_job()
-    assert job_id is not None
-    assert job_status == shred.stage_1_init
-
-@pytest.mark.slow
-def test_s1_ingest_targets():
-    shred.log.info("Testing Target File Ingest")
-    test_file = get_test_file()
-    job_id, job_status = shred.s1_init_new_job()
-    job_id, job_status = shred.s1_ingest_targets(job_id, test_file)
-    # this removes the test file from availability, so we have to pop it off the queue
-    assert job_id is not None
-    assert job_status == shred.stage_1_success
 
 @pytest.mark.slow
 def test_get_worker_identity():
@@ -286,37 +222,38 @@ def test_get_worker_identity():
     # testing is a valid IP returned
     socket.inet_aton(worker_id)
 
+
 @pytest.mark.slow
-def test_prepare_blocklists():
-    ensure_job_id()
-    test_worklist = shred.get_jobs_by_status(shred.stage_1_success)
-    assert test_worklist > 0
-    shred.ensure_zk()
-    test_result = shred.s2_main_workflow(test_job_id)
-    assert test_result == shred.stage_2_success
-
-
-def test_get_jobs_by_status():
+def test_find_mount_point():
     pass
 
 
-def test_get_target_by_jobid():
+@pytest.mark.slow
+def test_parse_fsck_iter():
+    shred.log.info("Testing FSCK parser")
+    test_file = get_test_file()
+    fsck_content = shred.s2_get_fsck_output(test_file)
+    out = shred.parse_fsck_iter(fsck_content)
+    assert isinstance(out, dict)
+
+
+@pytest.mark.slow
+def test_get_jobs():
     pass
 
 
-def test_s2_get_fsck_output():
+@pytest.mark.slow
+def test_find_shard():
     pass
 
 
-def test_s2_parse_blocks_from_fsck():
+@pytest.mark.slow
+def test_persist_job_info():
     pass
 
 
-def test_get_workers_state_by_job():
-    pass
-
-
-def test_get_this_worker_block_list_by_job():
+@pytest.mark.slow
+def test_retrieve_job_info():
     pass
 
 
