@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Configuration parameters for Shred client and server processors"""
 
-VERSION = "0.0.4"
+VERSION = "0.0.5"
 
 TEST_MODE = True
 LOG_LEVEL = "DEBUG"

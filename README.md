@@ -1,11 +1,11 @@
 # hdfs-shred
 Proof of Concept for Secure Delete on Hadoop; to shred files deleted from HDFS for audit compliance.  
-  Implented in Python2.x for native compaitbility with most Linux distributions.  
+  Implemented against Python2.6 for native compaitbility with most Linux distributions.  
   Conceived as distributed collection of asynchronous workers coordinated via ZooKeeper and HDFS.  
 With apologies to maintainers; I couldn't resist the references to 1987 Teenage Mutant Ninja Turtles.  
 
 ## Status
-Functionality incomplete; basic tests passing.
+Functionality complete; basic tests passing on single node cluster, pending multinode test harness
 THIS CODE IS NOT READY FOR USE ON ANY LIVE ENVIRONMENT.
 
 ## Summary
@@ -25,34 +25,41 @@ Uses a three-phase approach to the secure shredding of files in HDFS, which matc
 
 ## Operational Modes' workflows
 ### Client
+[Stage 1]
 Check that a valid file has been submitted for Shredding  
 Check that HDFS Client and ZooKeeper are available  
 Moves the File to /.shred directory in HDFS and creates numbered subdir to track job actions and status
 
 ### Worker
-Runs every x minutes on all DataNodes  
+Designed to run every x minutes on all DataNodes  
+[Stage 2]
 Checks for new jobs in HDFS:/.shred  
-Generates a leader election via ZK if necessary  
-Leader collects block file list from Namenode, writes to numbered subdir of HDFS:/.shred for each Datanode worker, i.e HDFS:/.shred/#/DNName/blocklist, updates job status as ready for linux cp, starts polling DN status files for updates  
-Workers linux-find then linux-cp local block files to a ext4:/.shred folder on the same partition, to maintain pointer to physical blocks once HDFS file is 'deleted', then update status in HDFS:/.shred/#/DNName/status file  
+Generates a leader lease via ZK  
+Leader collects block file list from Namenode, writes to job subdir of HDFS:/.shred for each Datanode worker, i.e HDFS:/.shred/job_guid/worker_IP_shard_list  
+[Stage 3]  
+Workers linux-find then linux-cp local block files to a ext4:/.shred folder on the same partition, to maintain pointer to physical blocks once HDFS file is 'deleted', then update status in job store
+[Stage 4]
+Generates a leader lease via ZK  
 When all blockfiles are marked as copied, leader deletes the file from HDFS, updates job status  
-Workers then update status of their job in HDFS:/.shred/#/DNName/status as ready for shredding  
+then update status of the job in HDFS:/.shred/#/DNName/status as ready for shredding  
 
 ### Shredder
 Intended to be scheudled out-of-hours as shredding is resource intensive  
+[Stage 5]
 Checks for files ready for shredding and uses linux shred command to securely delete them  
-Finally updates HDFS:/.shred/#/DNName/status with shredded status
+[Stage 6]
+Checks that all shards were shredded and closes the job
 
 ## Features
 * Managed via central config file.  
 * Logs all activity to Syslog.  
 * Uses HDFS dir to track global job state of deletion and shredding actions.
-* [TODO]Uses Linux cp pointer to maintain disk block ownership after HDFS delete
+* Uses Linux cp pointer to maintain disk block ownership after HDFS delete
 * Uses hadoop fsck to get file blocks. 
 * Uses HDFScli module to interact with HDFS where possible.
 * Uses Kazoo module to interact with ZooKeeper for distributed task cordination
-* [TODO]Uses Linux shred command to destroy disk blocks.
-* [TODO]Integrates easily with Cron for scheduling
+* Uses Linux shred command to destroy disk blocks.
+* [In Progress]Integrates with Cron for scheduling
 * [In Progress] Extensive testing
 
 
@@ -70,3 +77,4 @@ This implementation uses the JVM-reliant HDFScli library for Python (http://hdfs
 0.0.2 Revised logic to run as async distributed service on all datanodes  
 0.0.3 Revised to remove race condition of 0.0.2 by running distributed transaction via ZooKeeper  
 0.0.4 Moved status and notes tracking out of ZooKeeper into HDFS to avoid melting ZK during large operations  
+0.0.5 All tests passing on single-node cluster for main workflows

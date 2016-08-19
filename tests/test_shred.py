@@ -332,7 +332,7 @@ def test_run_stage_6():
 def test_parse_user_args():
     shred.log.info("Testing argparse")
     out = shred.parse_user_args(["-m", "client", "-f", "somefile"])
-    assert out.filename == "somefile"
+    assert "somefile" in out.filename
     assert out.mode == "client"
     out = shred.parse_user_args(["-m", "worker"])
     assert out.mode == "worker"
@@ -389,30 +389,31 @@ def test_find_mount_point():
 
 @pytest.mark.skip
 def test_parse_fsck_iter():
-    shred.log.info("Testing FSCK parser")
-    test_file = get_test_file()
-    fsck_content = shred.s2_get_fsck_output(test_file)
-    out = shred.parse_fsck_iter(fsck_content)
-    assert isinstance(out, dict)
+    # No test written
+    pass
 
 
 @pytest.mark.skip
 def test_get_jobs():
+    # No test written
     pass
 
 
 @pytest.mark.skip
 def test_find_shard():
+    # No test written
     pass
 
 
 @pytest.mark.skip
 def test_persist_job_info():
+    # No test written
     pass
 
 
 @pytest.mark.skip
 def test_retrieve_job_info():
+    # No test written
     pass
 
 
