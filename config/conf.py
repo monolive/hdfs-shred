@@ -12,12 +12,12 @@ HDFS_ROOT = '/hadoop/hdfs/data'
 ZOOKEEPER = {
     'HOST': 'localhost',
     'PORT': 2181,
-    'PATH': '/shred/'
+    'PATH': '/testshred/'
 }
 
-HDFS_SHRED_PATH = "/tmp/shred"
+HDFS_SHRED_PATH = "/tmp/testshred"
 
-LINUXFS_SHRED_PATH = ".shred"
+LINUXFS_SHRED_PATH = ".testshred"
 
 # Number of times to overwrite the file before writing out zeros and removing it from the filesystem
 # a SHRED_COUNT of 6 will overwrite the file 7 times; 6 with random garbage, and the 7th as zeros.

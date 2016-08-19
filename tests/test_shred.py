@@ -1,16 +1,12 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from os.path import join as ospathjoin
 from glob import glob
 from shlex import split as ssplit
-import argparse
-from kazoo.client import KazooClient
-from kazoo.handlers.threading import KazooTimeoutError
+from os.path import join as ospathjoin
+from os.path import isfile 
 import pytest
 import shred
-import logging
-import collections
 import socket
 
 
@@ -22,24 +18,18 @@ test_files = []
 # test_job_id = None
 # test_job_status = None
 
-# Test control Params
+# Test cleanup Params
 remove_test_files = False
 remove_test_zkdata = True
-remove_test_jobs = True
+remove_test_jobs = False
 
-# Config overrides
-shred.log.setLevel(shred.logging.DEBUG)
-shred.conf.ZOOKEEPER['PATH'] = '/testshred/'
-shred.conf.LINUXFS_SHRED_PATH = ".testshred"
-shred.conf.HDFS_SHRED_PATH = "/tmp/testshred"
 
 # ###################          Test Environment setup   ##########################
 
 
 def setup_module():
-    # Moved data setup and cleanup to individual tests
-    # It's slower overall, but cleaner if tests are to be run individually
-    pass
+    # clear environment from previous test runs
+    clear_test_jobs()
 
 
 def teardown_module():
@@ -119,7 +109,7 @@ def get_test_file():
 # ###################          Main workflow tests            ##########################
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_init_program():
     # This simply tests the code pathway in init_program; parse args is tested independently
     test_file = get_test_file()
@@ -131,47 +121,214 @@ def test_init_program():
     assert path_test['type'] == "DIRECTORY"
 
 
+@pytest.mark.skip
 def test_run_stage_1():
     # test a bad file
     result, test_job_id = shred.run_stage(shred.stage_1, 'not_a_file')
     assert result == shred.status_fail
     job_status = shred.retrieve_job_info(test_job_id, "master")
     assert shred.status_fail in job_status
+    assert shred.stage_1 in job_status
     data_status = shred.retrieve_job_info(test_job_id, "data_status")
     assert shred.status_fail in data_status
+    assert shred.stage_1 in data_status
     # test a good file
     test_file = get_test_file()
-    result, test_job_id = shred.run_stage(shred.stage_1, test_file)
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
     assert result == shred.status_success
     job_status = shred.retrieve_job_info(test_job_id, "master")
     assert shred.status_success in job_status
+    assert shred.stage_1 in job_status
     data_status = shred.retrieve_job_info(test_job_id, "data_status")
     assert shred.status_success in data_status
+    assert shred.stage_1 in data_status
     # Only tests a single file
     target = shred.retrieve_job_info(test_job_id, "data_file_list")
     target_exists = shred.hdfs.status(target, strict=False)
     assert target_exists is not None
+    with pytest.raises(shred.HdfsError):
+        shred.hdfs.status(test_file)
 
 
-@pytest.mark.slow
-def test_worker_main():
-    shred.log.info("Clearing all test jobs to prepare an uncluttered test run for worker_main()")
+@pytest.mark.skip
+def test_run_stage_2():
     clear_test_jobs()
-    result = shred.worker_main()
-    assert result == shred.stage_4_no_init
-    shred.log.info("Generating a new job to test worker_main()")
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_skip
     test_file = get_test_file()
-    result, test_job_id = shred.client_main(test_file)
-    assert result == shred.stage_1_success
-    shred.log.info("Running test of worker main with single active job in s1_success state")
-    result = shred.worker_main()
-    assert result == shred.stage_4_success
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
+    assert shred.status_success in result
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_success
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_success in job_status
+    assert shred.stage_2 in job_status
+    workers_list = shred.retrieve_job_info(test_job_id, "worker_list", strict=False)
+    assert workers_list is not None
+    for worker in workers_list:
+        worker_status = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_status", strict=False
+        )
+        assert shred.status_success in worker_status
+        assert shred.stage_2 in worker_status
+        source_shard_dict = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_source_shard_dict", strict=False
+        )
+        assert source_shard_dict is not None
+        for shard in source_shard_dict:
+            assert source_shard_dict[shard] == shred.status_no_init
+
+
+@pytest.mark.skip
+def test_run_stage_3():
+    clear_test_jobs()
+    result = shred.run_stage(shred.stage_3)
+    assert result == shred.status_skip
+    test_file = get_test_file()
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
+    assert shred.status_success in result
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_3)
+    assert result == shred.status_success
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_success in job_status
+    # Master status doesn't change for distributed tasks until next leader task
+    assert shred.stage_2 in job_status
+    workers_list = shred.retrieve_job_info(test_job_id, "worker_list", strict=False)
+    assert workers_list is not None
+    for worker in workers_list:
+        worker_status = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_status", strict=False
+        )
+        assert shred.status_success in worker_status
+        assert shred.stage_3 in worker_status
+        source_shard_dict = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_source_shard_dict", strict=False
+        )
+        assert source_shard_dict is not None
+        for shard in source_shard_dict:
+            assert source_shard_dict[shard] == shred.status_success
+        linked_shard_dict = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_linked_shard_dict", strict=False
+        )
+        assert linked_shard_dict is not None
+        for shard in linked_shard_dict:
+            assert linked_shard_dict[shard] == shred.status_no_init
+            assert isfile(shard)
+
+
+@pytest.mark.skip
+def test_run_stage_4():
+    clear_test_jobs()
+    result = shred.run_stage(shred.stage_4)
+    assert result == shred.status_skip
+    test_file = get_test_file()
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
+    assert shred.status_success in result
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_3)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_4)
+    assert result == shred.status_success
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_success in job_status
+    assert shred.stage_4 in job_status
+    data_status = shred.retrieve_job_info(test_job_id, "data_status")
+    assert shred.status_success in data_status
+    assert shred.stage_4 in data_status
+    target = shred.retrieve_job_info(test_job_id, "data_file_list")
+    target_exists = shred.hdfs.status(target, strict=False)
+    assert target_exists is None
+    workers_list = shred.retrieve_job_info(test_job_id, "worker_list", strict=False)
+    assert workers_list is not None
+    for worker in workers_list:
+        worker_status = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_status", strict=False
+        )
+        assert shred.status_success in worker_status
+        assert shred.stage_3 in worker_status or shred.stage_4 in worker_status
+        linked_shard_dict = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_linked_shard_dict", strict=False
+        )
+        assert linked_shard_dict is not None
+        for shard in linked_shard_dict:
+            assert linked_shard_dict[shard] == shred.status_no_init
+            assert isfile(shard)
+
+
+@pytest.mark.skip
+def test_run_stage_5():
+    clear_test_jobs()
+    result = shred.run_stage(shred.stage_5)
+    assert result == shred.status_skip
+    test_file = get_test_file()
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
+    assert shred.status_success in result
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_3)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_4)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_5)
+    assert result == shred.status_success
+    workers_list = shred.retrieve_job_info(test_job_id, "worker_list", strict=False)
+    assert workers_list is not None
+    for worker in workers_list:
+        worker_status = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_status", strict=False
+        )
+        assert shred.status_success in worker_status
+        assert shred.stage_5 in worker_status
+        linked_shard_dict = shred.retrieve_job_info(
+            test_job_id, "worker_" + worker + "_linked_shard_dict", strict=False
+        )
+        assert linked_shard_dict is not None
+        for shard in linked_shard_dict:
+            assert linked_shard_dict[shard] == shred.status_success
+            assert not isfile(shard)
+
+
+def test_run_stage_6():
+    clear_test_jobs()
+    result = shred.run_stage(shred.stage_6)
+    assert result == shred.status_skip
+    test_file = get_test_file()
+    test_args = ["-m", "client", "-f", test_file]
+    args = shred.init_program(test_args)
+    result, test_job_id = shred.run_stage(shred.stage_1, args.filename)
+    assert shred.status_success in result
+    result = shred.run_stage(shred.stage_2)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_3)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_4)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_5)
+    assert result == shred.status_success
+    result = shred.run_stage(shred.stage_6)
+    assert result == shred.status_success
+    job_status = shred.retrieve_job_info(test_job_id, "master")
+    assert shred.status_success in job_status
+    assert shred.stage_6 in job_status
 
 
 # ###################          Individual Function tests            ##########################
 
 
-@pytest.mark.slow
+# @pytest.mark.skip
 def test_parse_user_args():
     shred.log.info("Testing argparse")
     out = shred.parse_user_args(["-m", "client", "-f", "somefile"])
@@ -193,7 +350,7 @@ def test_parse_user_args():
         shred.parse_user_args(["-h"])
 
 
-@pytest.mark.slow
+# @pytest.mark.skip
 def test_ensure_zk():
     shred.log.info("Testing ZooKeeper connector")
     # Good host
@@ -203,7 +360,7 @@ def test_ensure_zk():
     assert shred.zk.state == 'LOST'
 
 
-@pytest.mark.slow
+# @pytest.mark.skip
 def test_ensure_hdfs():
     shred.log.info("Testing Connection to HDFS")
     shred.ensure_hdfs()
@@ -211,24 +368,26 @@ def test_ensure_hdfs():
     # TODO: This really needs connection tracking
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_run_shell_command():
     pass
 
 
-@pytest.mark.slow
+# @pytest.mark.skip
 def test_get_worker_identity():
     worker_id = shred.get_worker_identity()
     # testing is a valid IP returned
+    # TODO: Construct better identity management
     socket.inet_aton(worker_id)
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_find_mount_point():
+    # No test written
     pass
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_parse_fsck_iter():
     shred.log.info("Testing FSCK parser")
     test_file = get_test_file()
@@ -237,22 +396,22 @@ def test_parse_fsck_iter():
     assert isinstance(out, dict)
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_get_jobs():
     pass
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_find_shard():
     pass
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_persist_job_info():
     pass
 
 
-@pytest.mark.slow
+@pytest.mark.skip
 def test_retrieve_job_info():
     pass
 
@@ -260,3 +419,4 @@ def test_retrieve_job_info():
 # ###################          Data fuzzing tests            ##########################
 
 # TODO: Test for 0 size files that make fsck behave differently
+# TODO: deliberately break status and data control files and check that it barfs appropriately for each stage

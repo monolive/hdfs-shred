@@ -106,10 +106,10 @@ def parse_user_args(user_args):
 
 def ensure_zk():
     """create global connection handle to ZooKeeper"""
+    global zk
     zk_host = conf.ZOOKEEPER['HOST'] + ':' + str(conf.ZOOKEEPER['PORT'])
     if not zk or zk.state != 'CONNECTED':
         log.debug("Connecting to Zookeeper using host param [{0}]".format(zk_host))
-        global zk
         zk = KazooClient(hosts=zk_host)
         zk.start()
     if zk.state is 'CONNECTED':
@@ -121,10 +121,10 @@ def ensure_zk():
 
 def ensure_hdfs():
     """Uses HDFScli to connect to HDFS returns handle object"""
+    global hdfs
     if not hdfs:
         log.debug("Attempting to instantiate HDFS client")
         # TODO: Write try/catch for connection errors and states
-        global hdfs
         try:
             hdfs = Config("./config/hdfscli.cfg").get_client()
         except HdfsError:
@@ -262,7 +262,10 @@ def persist_job_info(job, component, stage, info):
         content = dumps(stage + "-" + info)
     elif 'worker' in component or 'data' in component:
         file_path = ospathjoin(conf.HDFS_SHRED_PATH, "store", job, component)
-        content = dumps(info)
+        if 'status' in component:
+            content = dumps(stage + "-" + info)
+        else:
+            content = dumps(info)
     else:
         raise StandardError("Function persist_job_info was passed an unrecognised component name")
     if file_path is not None:
@@ -319,8 +322,8 @@ def init_program(passed_args):
     # Test necessary connections
     ensure_hdfs()
     # Check directories etc. are setup
-    hdfs.makedirs(conf.HDFS_SHRED_PATH)
-    hdfs.makedirs(ospathjoin(conf.HDFS_SHRED_PATH, "jobs", "archive"))
+    hdfs.makedirs(ospathjoin(conf.HDFS_SHRED_PATH, "jobs"))
+    hdfs.makedirs(ospathjoin(conf.HDFS_SHRED_PATH, "store"))
     # TODO: Further Application setup tests
     return parsed_args
 
@@ -381,8 +384,15 @@ def run_stage(stage, params=None):
                     # Leader Jobs for stages 2, 4, and 6
                     # We use the absence of a leader_result to control activity within leader tasks
                     leader_result = None
-                    worker_status = (retrieve_job_info(job, "worker_" + worker + "_status")).split("-")[1]
-                    if worker_status not in [status_success, status_skip, status_task_timeout]:
+                    # Worker may not yet have status file initialised for s2 of job
+                    worker_status = (retrieve_job_info(job, "worker_" + worker + "_status", strict=False))
+                    # TODO: Move worker state validation to a seperate function returning a t/f against worker/stage
+                    if (
+                        (worker_status is None and stage != stage_2) or
+                        (worker_status is not None and worker_status not in [
+                            stage_3 + "-" + status_success, stage_3 + "-" + status_skip, stage_4 + "-" + status_task_timeout,
+                            stage_5 + "-" + status_success, stage_5 + "-" + status_skip, stage_6 + "-" + status_task_timeout,
+                    ])):
                         log.critical(
                             "Worker [{0}] is in status [{1}] for job [{2}], which is not valid to be [{3}] leader."
                             .format(worker, worker_status, job, stage)
@@ -471,16 +481,7 @@ def run_stage(stage, params=None):
                                         elif stage == stage_6:
                                             # All workers have completed shredding, shut down job and clean up
                                             # TODO: Test that job completed as expected
-                                            persist_job_info(job, 'master', stage, status_success)
-                                            job_master = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", job)
-                                            archive_path = ospathjoin(conf.HDFS_SHRED_PATH, "jobs", "archive")
-                                            try:
-                                                hdfs.rename(job_master, archive_path)
-                                                leader_result = status_success
-                                            except HdfsError:
-                                                log.critical("Failed to archive job [{0}] on completion"
-                                                             .format(job))
-                                                leader_result = status_fail
+                                            leader_result = status_success
                                 else:
                                     raise StandardError("Bad stage passed to run_stage")
                             lease = False
@@ -571,7 +572,7 @@ def run_stage(stage, params=None):
                             persist_job_info(job, "worker_" + worker + "_source_shard_dict", stage, targets_dict)
                             persist_job_info(job, "worker_" + worker + "_linked_shard_dict", stage, linked_shard_dict)
                         if stage == stage_5:
-                            persist_job_info(job, "worker_" + worker + "_linked_shard_dict", stage, linked_shard_dict)
+                            persist_job_info(job, "worker_" + worker + "_linked_shard_dict", stage, targets_dict)
                         # sanity test if task is completed successfully
                         target_status = []
                         for shard in targets_dict:
