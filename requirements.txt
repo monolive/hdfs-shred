@@ -1,0 +1,4 @@
+kazoo>=2.2.1
+syslog-rfc5424-formatter>=1.0.0
+hdfs>=2.0.9
+pytest>=2.9.1
